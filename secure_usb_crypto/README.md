@@ -78,8 +78,17 @@ cd /home/chuvu/camellia-project/secure_usb_crypto/app
 ### Buoc A: Chuan bi
 1. Cam chuot USB dongle `1a81:101f`.
 2. Build driver + app.
+```
+cd /home/chuvu/camellia-project/secure_usb_crypto
+make -C driver
+make -C app
+```
 3. Nap module.
-
+```
+sudo rmmod usb_crypto_drv 2>/dev/null || true
+sudo insmod /home/chuvu/camellia-project/secure_usb_crypto/driver/usb_crypto_drv.ko
+ls -l /dev/crypto_mouse
+```
 ### Buoc B: Demo mo khoa bang physical key
 1. Khi chuot dang cam:
 ```bash
@@ -120,3 +129,25 @@ sudo dmesg | grep -Ei "crypto_mouse|usb_crypto_drv|notifier|encrypt|decrypt|deni
 - Ban hien tai gioi han du lieu 1 lan xu ly toi da `4096` bytes.
 - Che do ma hoa dang o muc demo hoc tap (ECB + PKCS#7), phu hop minh hoa de tai.
 - Neu can ban nang cao de bao cao an toan hon, co the nang cap CBC/XTS + IV + dinh dang file co header.
+
+## 9) Don dep sau khi demo
+
+### Buoc 1: Go module khoi kernel
+```bash
+sudo rmmod usb_crypto_drv 2>/dev/null || true
+```
+
+### Buoc 2: Xoa file demo tam trong app
+```bash
+cd /home/chuvu/camellia-project/secure_usb_crypto
+rm -f app/demo.txt app/demo.enc app/demo.dec
+rm -f app/sample_input.txt app/sample.enc app/sample.dec
+```
+
+### Buoc 3: Don dep build artifacts
+```bash
+make -C driver clean
+make -C app clean
+```
+
+
