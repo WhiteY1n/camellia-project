@@ -179,6 +179,7 @@ sudo python3 app/crypto_mouse_gui.py
 - Progress bar realtime khi encrypt/decrypt batch va folder.
 - Nut `Open Last Output Folder` de mo nhanh thu muc chua file ket qua.
 - GUI tu dong cap nhat trang thai USB mouse (cam/rut) theo thoi gian thuc, khong can bam `Check Status`.
+- Co them tab `Modify` de sua noi dung file text `.enc` va luu de file `.enc` cu.
 
 ### Luong Encrypt trong GUI
 1. Chon scope: File(s) / Folder recursive.
@@ -207,5 +208,16 @@ Ket qua:
 - Neu file `.enc` bi sua/hong: decrypt file do se bao loi va dung file do.
 - Trong batch/folder: file loi se duoc ghi vao tong ket, cac file khac van tiep tuc.
 - Encrypt/decrypt file trong GUI da su dung co che chunk cua CLI, nen khong con bi chan boi gioi han tong kich thuoc file.
+
+### Tab Modify (chi ho tro text)
+1. Chon file `.enc` text can sua.
+2. Bam `Load For Edit`, nhap key file + passphrase de decrypt vao editor.
+3. Sua noi dung text trong editor.
+4. Bam `Save (Overwrite .enc)` de ma hoa lai va ghi de file `.enc` cu.
+
+Gioi han hien tai:
+- Chi ho tro file text UTF-8.
+- Khong backup.
+- Chua ho tro modify file `.zip.enc`.
 
 

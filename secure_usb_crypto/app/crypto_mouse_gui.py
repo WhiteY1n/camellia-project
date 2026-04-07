@@ -392,6 +392,9 @@ class App(tk.Tk):
         self.decrypt_files = []
         self.encrypt_folder = ""
         self.decrypt_folder = ""
+        self.modify_target = ""
+        self.modify_key_hex = ""
+        self.modify_keyfile = ""
         self.generated_key_hex = ""
         self.active_key_path = ""
         self.last_output_dir = ""
@@ -415,12 +418,15 @@ class App(tk.Tk):
 
         enc_tab = ttk.Frame(notebook, padding=10)
         dec_tab = ttk.Frame(notebook, padding=10)
+        mod_tab = ttk.Frame(notebook, padding=10)
         notebook.add(enc_tab, text="Encrypt")
         notebook.add(dec_tab, text="Decrypt")
+        notebook.add(mod_tab, text="Modify")
         notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
 
         self._build_encrypt_tab(enc_tab)
         self._build_decrypt_tab(dec_tab)
+        self._build_modify_tab(mod_tab)
 
         progress_wrap = ttk.Frame(self, padding=(10, 0, 10, 6))
         progress_wrap.pack(fill="x")
@@ -500,6 +506,21 @@ class App(tk.Tk):
     def on_tab_changed(self, _event):
         self.reset_encrypt_selection()
         self.reset_decrypt_selection()
+
+    def _build_modify_tab(self, parent):
+        btns = ttk.Frame(parent)
+        btns.pack(fill="x", pady=(0, 8))
+        ttk.Button(btns, text="Select .enc Text File", command=self.pick_modify_target).pack(side="left")
+        ttk.Button(btns, text="Load For Edit", command=self.load_modify_content).pack(side="left", padx=8)
+        ttk.Button(btns, text="Save (Overwrite .enc)", command=self.save_modify_content).pack(side="left", padx=8)
+
+        self.modify_target_label = ttk.Label(parent, text="Modify target: none")
+        self.modify_target_label.pack(fill="x", pady=(0, 4))
+        self.modify_key_label = ttk.Label(parent, text="Modify key: not loaded")
+        self.modify_key_label.pack(fill="x", pady=(0, 8))
+
+        self.modify_text = tk.Text(parent, height=18)
+        self.modify_text.pack(fill="both", expand=True)
 
     def _build_encrypt_tab(self, parent):
         self._build_mode_picker(parent, self.encrypt_mode, self.on_encrypt_mode_change)
@@ -667,6 +688,112 @@ class App(tk.Tk):
             self.dec_target_label.config(text=f"Folder: {self.decrypt_folder or 'none'}")
         else:
             self.dec_target_label.config(text=f"Files(.enc): {len(targets)} selected")
+
+    def pick_modify_target(self):
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Chon file .enc can sua noi dung text",
+            filetypes=[("Encrypted file", "*.enc"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        p = Path(path)
+        if p.suffix != ".enc":
+            messagebox.showwarning("Canh bao", "Chi ho tro file .enc")
+            return
+
+        if p.name.endswith(".zip.enc"):
+            messagebox.showwarning(
+                "Chua ho tro",
+                "Tab Modify hien tai chi ho tro file text .enc don, chua ho tro .zip.enc",
+            )
+            return
+
+        self.modify_target = str(p)
+        self.modify_target_label.config(text=f"Modify target: {p}")
+
+    # Ham decrypt file .enc text vao editor de user sua noi dung.
+    def load_modify_content(self):
+        if not CLI_PATH.exists():
+            messagebox.showerror("Loi", "Khong tim thay crypto_mouse_cli. Hay build app truoc")
+            return
+
+        if not self.modify_target:
+            messagebox.showwarning("Can target", "Hay chon file .enc can modify")
+            return
+
+        dlg = KeyUnlockDialog(self)
+        self.wait_window(dlg)
+        if not dlg.result:
+            return
+
+        keyfile, passphrase = dlg.result
+        try:
+            key_hex = decrypt_keyfile(keyfile, passphrase)
+        except Exception as exc:
+            messagebox.showerror("Loi key file", f"Khong mo duoc key file: {exc}")
+            return
+
+        fd, tmp_name = tempfile.mkstemp(prefix="modify_plain_", suffix=".txt")
+        os.close(fd)
+        tmp_plain = Path(tmp_name)
+        try:
+            res = run_cli(["decrypt-file", key_hex, self.modify_target, str(tmp_plain)])
+            if res.returncode != 0:
+                err = (res.stderr or res.stdout).strip()
+                messagebox.showerror("Loi decrypt", err or "Khong decrypt duoc file")
+                return
+
+            try:
+                text = tmp_plain.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                messagebox.showerror("Khong ho tro", "File giai ma khong phai text UTF-8")
+                return
+
+            self.modify_text.delete("1.0", "end")
+            self.modify_text.insert("1.0", text)
+            self.modify_key_hex = key_hex
+            self.modify_keyfile = keyfile
+            self.modify_key_label.config(text=f"Modify key: loaded -> {keyfile}")
+            self.log(f"MODIFY LOAD OK: {self.modify_target}")
+        finally:
+            tmp_plain.unlink(missing_ok=True)
+
+    # Ham luu noi dung text dang sua va ma hoa de ghi de file .enc cu.
+    def save_modify_content(self):
+        if not CLI_PATH.exists():
+            messagebox.showerror("Loi", "Khong tim thay crypto_mouse_cli. Hay build app truoc")
+            return
+
+        if not self.modify_target:
+            messagebox.showwarning("Can target", "Hay chon file .enc can modify")
+            return
+
+        if not self.modify_key_hex:
+            messagebox.showwarning("Can key", "Hay Load For Edit truoc de nap key")
+            return
+
+        content = self.modify_text.get("1.0", "end-1c")
+
+        fd, tmp_name = tempfile.mkstemp(prefix="modify_save_", suffix=".txt")
+        os.close(fd)
+        tmp_plain = Path(tmp_name)
+        try:
+            tmp_plain.write_text(content, encoding="utf-8")
+
+            res = run_cli(["encrypt-file", self.modify_key_hex, str(tmp_plain), self.modify_target])
+            if res.returncode != 0:
+                err = (res.stderr or res.stdout).strip()
+                messagebox.showerror("Loi encrypt", err or "Khong encrypt duoc file")
+                self.log(f"MODIFY SAVE FAIL: {self.modify_target}")
+                return
+
+            self.last_output_dir = str(Path(self.modify_target).parent)
+            self.log(f"MODIFY SAVE OK: overwrite {self.modify_target}")
+            messagebox.showinfo("Thanh cong", "Da luu va ma hoa de file .enc cu")
+        finally:
+            tmp_plain.unlink(missing_ok=True)
 
     # Ham tao key hex random dua tren entropy tu du lieu di chuyen chuot USB.
     def generate_key_from_mouse(self):
