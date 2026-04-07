@@ -150,4 +150,59 @@ make -C driver clean
 make -C app clean
 ```
 
+## 10) GUI (Tkinter) cho encrypt/decrypt
+
+GUI file nam tai: `app/crypto_mouse_gui.py`
+
+### Cai dependency GUI
+```bash
+cd /home/chuvu/camellia-project/secure_usb_crypto
+sudo apt-get update
+sudo apt-get install -y python3 python3-tk python3-cryptography
+```
+
+### Build app CLI (GUI se goi lai CLI)
+```bash
+cd /home/chuvu/camellia-project/secure_usb_crypto
+make -C app
+```
+
+### Chay GUI
+Luu y: de lay entropy tu su kien chuot USB (`/dev/input/eventX`), nen chay bang sudo.
+
+```bash
+cd /home/chuvu/camellia-project/secure_usb_crypto
+sudo python3 app/crypto_mouse_gui.py
+```
+
+### Tinh nang GUI moi
+- Progress bar realtime khi encrypt/decrypt batch va folder.
+- Nut `Open Last Output Folder` de mo nhanh thu muc chua file ket qua.
+- GUI tu dong cap nhat trang thai USB mouse (cam/rut) theo thoi gian thuc, khong can bam `Check Status`.
+
+### Luong Encrypt trong GUI
+1. Chon scope: Single file / Multi file / Folder recursive.
+2. Bam `Select Target` de chon file/folder.
+3. Bam `Generate Key From USB Mouse`.
+4. Di chuyen chuot trong 5 giay.
+5. Nhap passphrase va luu key file (vi du `secret.key`).
+6. Bam `Encrypt`.
+
+Ket qua:
+- File duoc tao them duoi `.enc`.
+- File da co duoi `.enc` se duoc bo qua trong batch/folder.
+
+### Luong Decrypt trong GUI
+1. Chon scope va chon target `.enc`.
+2. Bam `Decrypt (Using Key File)`.
+3. Chon `secret.key` + nhap passphrase.
+4. GUI giai ma va tao file output:
+	- Neu input la `abc.txt.enc` -> output `abc.txt`
+	- Neu input khong dung duoi `.enc` -> output them `.dec`
+
+### Xu ly loi quan trong
+- Neu rut chuot USB key: driver se chan read/write/encrypt/decrypt.
+- Neu file `.enc` bi sua/hong: decrypt file do se bao loi va dung file do.
+- Trong batch/folder: file loi se duoc ghi vao tong ket, cac file khac van tiep tuc.
+
 

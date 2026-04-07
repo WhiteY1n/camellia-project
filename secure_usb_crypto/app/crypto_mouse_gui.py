@@ -1,0 +1,727 @@
+#!/usr/bin/env python3
+import base64
+import hashlib
+import json
+import os
+import select
+import struct
+import subprocess
+import time
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+CLI_PATH = ROOT_DIR / "app" / "crypto_mouse_cli"
+KEYFILE_AAD = b"secure_usb_crypto:keyfile:v1"
+INPUT_EVENT_FMT = "llHHi"
+INPUT_EVENT_SIZE = struct.calcsize(INPUT_EVENT_FMT)
+
+
+# Ham goi app CLI C hien co va tra ket qua stdout/stderr cho GUI xu ly.
+def run_cli(args):
+    cmd = [str(CLI_PATH)] + args
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+# Ham parse dong status dang key=value key=value thanh dict de GUI de doc.
+def parse_status_line(line):
+    parts = line.strip().split()
+    out = {}
+    for part in parts:
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        out[k] = v
+    return out
+
+
+# Ham tao khoa KEK tu passphrase qua PBKDF2 de ma hoa key file an toan hon.
+def derive_passphrase_key(passphrase, salt):
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=200000,
+    )
+    return kdf.derive(passphrase.encode("utf-8"))
+
+
+# Ham ma hoa key CAMELLIA bang AES-GCM va luu ra key file JSON.
+def encrypt_keyfile(raw_key_hex, passphrase, out_path):
+    raw_key = bytes.fromhex(raw_key_hex)
+    salt = os.urandom(16)
+    nonce = os.urandom(12)
+    kek = derive_passphrase_key(passphrase, salt)
+    ct = AESGCM(kek).encrypt(nonce, raw_key, KEYFILE_AAD)
+
+    payload = {
+        "version": 1,
+        "kdf": "PBKDF2-HMAC-SHA256",
+        "iterations": 200000,
+        "cipher": "AES-256-GCM",
+        "salt_b64": base64.b64encode(salt).decode("ascii"),
+        "nonce_b64": base64.b64encode(nonce).decode("ascii"),
+        "ciphertext_b64": base64.b64encode(ct).decode("ascii"),
+    }
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+# Ham mo key file JSON da ma hoa va giai ma lai key hex de decrypt file.
+def decrypt_keyfile(keyfile_path, passphrase):
+    with open(keyfile_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    salt = base64.b64decode(payload["salt_b64"])
+    nonce = base64.b64decode(payload["nonce_b64"])
+    ct = base64.b64decode(payload["ciphertext_b64"])
+
+    kek = derive_passphrase_key(passphrase, salt)
+    raw_key = AESGCM(kek).decrypt(nonce, ct, KEYFILE_AAD)
+    return raw_key.hex()
+
+
+# Ham kiem tra duong dan sysfs co thuoc USB VID/PID muc tieu hay khong.
+def is_usb_vidpid_path(path_obj, vid_hex="1a81", pid_hex="101f"):
+    cur = path_obj.resolve()
+    for _ in range(12):
+        vid_file = cur / "idVendor"
+        pid_file = cur / "idProduct"
+        if vid_file.exists() and pid_file.exists():
+            try:
+                vid = vid_file.read_text(encoding="utf-8").strip().lower()
+                pid = pid_file.read_text(encoding="utf-8").strip().lower()
+                return vid == vid_hex and pid == pid_hex
+            except OSError:
+                return False
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    return False
+
+
+def has_rel_xy_cap(event_node):
+    rel_file = event_node / "device" / "capabilities" / "rel"
+    try:
+        rel_mask = int(rel_file.read_text(encoding="utf-8").strip(), 16)
+    except (OSError, ValueError):
+        return False
+
+    return (rel_mask & 0x3) == 0x3
+
+
+def event_score(event_node):
+    score = 0
+    name_file = event_node / "device" / "name"
+    try:
+        name = name_file.read_text(encoding="utf-8").strip().lower()
+    except OSError:
+        name = ""
+
+    if "mouse" in name:
+        score += 2
+    if has_rel_xy_cap(event_node):
+        score += 3
+    return score
+
+
+# Ham tim event device /dev/input/eventX cua USB mouse dung VID/PID.
+def find_usb_mouse_event_device():
+    input_root = Path("/sys/class/input")
+    candidates = []
+
+    for event_node in sorted(input_root.glob("event*")):
+        if is_usb_vidpid_path(event_node / "device"):
+            candidates.append(event_node)
+
+    if not candidates:
+        return None
+
+    # Uu tien interface chuot that su (co REL_X/REL_Y va ten chua "mouse").
+    candidates.sort(key=event_score, reverse=True)
+    return Path("/dev/input") / candidates[0].name
+
+
+# Ham lay entropy tu su kien chuot USB trong 5 giay va bam SHA-256 sinh key.
+def collect_mouse_entropy_key_hex(duration_sec=5):
+    event_dev = find_usb_mouse_event_device()
+    if not event_dev:
+        raise RuntimeError("Khong tim thay event device cua USB mouse VID:PID 1a81:101f")
+
+    fd = os.open(str(event_dev), os.O_RDONLY | os.O_NONBLOCK)
+    deadline = time.time() + duration_sec
+    material = bytearray()
+    x = 0
+    y = 0
+
+    try:
+        while time.time() < deadline:
+            remaining = max(0.0, deadline - time.time())
+            rlist, _, _ = select.select([fd], [], [], min(0.2, remaining))
+            if not rlist:
+                continue
+
+            chunk = os.read(fd, INPUT_EVENT_SIZE * 64)
+            if not chunk:
+                continue
+
+            for i in range(0, len(chunk), INPUT_EVENT_SIZE):
+                ev = chunk[i : i + INPUT_EVENT_SIZE]
+                if len(ev) != INPUT_EVENT_SIZE:
+                    continue
+                sec, usec, ev_type, code, value = struct.unpack(INPUT_EVENT_FMT, ev)
+
+                if ev_type in (0x02, 0x03):
+                    if code == 0:
+                        x += value
+                    elif code == 1:
+                        y += value
+
+                material.extend(struct.pack("<qiii", int(sec), int(usec), int(x), int(y)))
+
+    finally:
+        os.close(fd)
+
+    if len(material) < 128:
+        raise RuntimeError(
+            f"Khong du du lieu chuot tu {event_dev}. Hay di chuyen chuot trong luc tao key"
+        )
+
+    digest = hashlib.sha256(bytes(material)).digest()
+    return digest[:16].hex()
+
+
+# Ham gom danh sach target encrypt theo mode single/multi/folder.
+def collect_encrypt_targets(mode, selected_files, selected_folder):
+    if mode == "single":
+        return [Path(selected_files[0])] if selected_files else []
+
+    if mode == "multi":
+        return [Path(p) for p in selected_files]
+
+    if mode == "folder":
+        if not selected_folder:
+            return []
+        all_files = []
+        for root, _, files in os.walk(selected_folder):
+            for name in files:
+                all_files.append(Path(root) / name)
+        return all_files
+
+    return []
+
+
+# Ham gom danh sach target decrypt va chi lay file co duoi .enc.
+def collect_decrypt_targets(mode, selected_files, selected_folder):
+    targets = []
+    if mode == "single":
+        if selected_files:
+            p = Path(selected_files[0])
+            if p.suffix == ".enc":
+                targets.append(p)
+        return targets
+
+    if mode == "multi":
+        for p in selected_files:
+            path = Path(p)
+            if path.suffix == ".enc":
+                targets.append(path)
+        return targets
+
+    if mode == "folder" and selected_folder:
+        for root, _, files in os.walk(selected_folder):
+            for name in files:
+                p = Path(root) / name
+                if p.suffix == ".enc":
+                    targets.append(p)
+    return targets
+
+
+# Ham dat ten output khi encrypt: them duoi .enc.
+def enc_output_path(in_path):
+    return in_path.with_name(in_path.name + ".enc")
+
+
+# Ham dat ten output khi decrypt: bo .enc neu co, nguoc lai them .dec.
+def dec_output_path(in_path):
+    if in_path.suffix == ".enc":
+        return in_path.with_suffix("")
+    return in_path.with_name(in_path.name + ".dec")
+
+
+class PassphraseDialog(tk.Toplevel):
+    def __init__(self, parent, title_text):
+        super().__init__(parent)
+        self.title(title_text)
+        self.resizable(False, False)
+        self.result = None
+
+        ttk.Label(self, text="Nhap passphrase:").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 4))
+        self.e1 = ttk.Entry(self, show="*")
+        self.e1.grid(row=1, column=0, padx=10, pady=4, ipadx=80)
+
+        ttk.Label(self, text="Nhap lai passphrase:").grid(row=2, column=0, sticky="w", padx=10, pady=(8, 4))
+        self.e2 = ttk.Entry(self, show="*")
+        self.e2.grid(row=3, column=0, padx=10, pady=4, ipadx=80)
+
+        btn_row = ttk.Frame(self)
+        btn_row.grid(row=4, column=0, pady=10)
+        ttk.Button(btn_row, text="OK", command=self.on_ok).grid(row=0, column=0, padx=5)
+        ttk.Button(btn_row, text="Cancel", command=self.on_cancel).grid(row=0, column=1, padx=5)
+
+        self.bind("<Return>", lambda _: self.on_ok())
+        self.bind("<Escape>", lambda _: self.on_cancel())
+
+    def on_ok(self):
+        p1 = self.e1.get()
+        p2 = self.e2.get()
+        if len(p1) < 6:
+            messagebox.showerror("Loi", "Passphrase toi thieu 6 ky tu", parent=self)
+            return
+        if p1 != p2:
+            messagebox.showerror("Loi", "Passphrase khong trung nhau", parent=self)
+            return
+        self.result = p1
+        self.destroy()
+
+    def on_cancel(self):
+        self.result = None
+        self.destroy()
+
+
+class KeyUnlockDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Mo key file")
+        self.resizable(False, False)
+        self.result = None
+
+        self.keyfile_var = tk.StringVar()
+
+        ttk.Label(self, text="Key file (.key/.json):").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 4))
+        row1 = ttk.Frame(self)
+        row1.grid(row=1, column=0, padx=10, pady=4, sticky="we")
+        ttk.Entry(row1, textvariable=self.keyfile_var, width=44).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(row1, text="Browse", command=self.pick_keyfile).grid(row=0, column=1)
+
+        ttk.Label(self, text="Passphrase:").grid(row=2, column=0, sticky="w", padx=10, pady=(8, 4))
+        self.pass_entry = ttk.Entry(self, show="*", width=48)
+        self.pass_entry.grid(row=3, column=0, padx=10, pady=4)
+
+        btn_row = ttk.Frame(self)
+        btn_row.grid(row=4, column=0, pady=10)
+        ttk.Button(btn_row, text="OK", command=self.on_ok).grid(row=0, column=0, padx=5)
+        ttk.Button(btn_row, text="Cancel", command=self.on_cancel).grid(row=0, column=1, padx=5)
+
+    def pick_keyfile(self):
+        path = filedialog.askopenfilename(
+            title="Chon key file",
+            filetypes=[("Key files", "*.key *.json"), ("All files", "*.*")],
+        )
+        if path:
+            self.keyfile_var.set(path)
+
+    def on_ok(self):
+        keyfile = self.keyfile_var.get().strip()
+        p = self.pass_entry.get().strip()
+        if not keyfile or not p:
+            messagebox.showerror("Loi", "Can key file va passphrase", parent=self)
+            return
+        self.result = (keyfile, p)
+        self.destroy()
+
+    def on_cancel(self):
+        self.result = None
+        self.destroy()
+
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Secure USB Crypto GUI")
+        self.geometry("880x560")
+
+        self.encrypt_mode = tk.StringVar(value="single")
+        self.decrypt_mode = tk.StringVar(value="single")
+        self.encrypt_files = []
+        self.decrypt_files = []
+        self.encrypt_folder = ""
+        self.decrypt_folder = ""
+        self.generated_key_hex = ""
+        self.last_output_dir = ""
+        self.last_mouse_present = None
+
+        self._build_ui()
+        self.poll_mouse_status()
+
+    def _build_ui(self):
+        top = ttk.Frame(self, padding=10)
+        top.pack(fill="x")
+
+        ttk.Label(top, text="Driver CLI:").pack(side="left")
+        ttk.Label(top, text=str(CLI_PATH)).pack(side="left", padx=(6, 16))
+        ttk.Button(top, text="Open Last Output Folder", command=self.open_last_output_folder).pack(side="left", padx=8)
+        self.mouse_status_label = tk.Label(top, text="USB Mouse: Dang kiem tra...", fg="#b36b00")
+        self.mouse_status_label.pack(side="left", padx=12)
+        notebook = ttk.Notebook(self)
+        notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        enc_tab = ttk.Frame(notebook, padding=10)
+        dec_tab = ttk.Frame(notebook, padding=10)
+        notebook.add(enc_tab, text="Encrypt")
+        notebook.add(dec_tab, text="Decrypt")
+
+        self._build_encrypt_tab(enc_tab)
+        self._build_decrypt_tab(dec_tab)
+
+        progress_wrap = ttk.Frame(self, padding=(10, 0, 10, 6))
+        progress_wrap.pack(fill="x")
+        self.progress_label = ttk.Label(progress_wrap, text="Progress: idle")
+        self.progress_label.pack(fill="x", pady=(0, 4))
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progress_bar = ttk.Progressbar(progress_wrap, mode="determinate", variable=self.progress_var, maximum=100)
+        self.progress_bar.pack(fill="x")
+
+        self.log_box = tk.Text(self, height=7)
+        self.log_box.pack(fill="both", padx=10, pady=(0, 10))
+
+    # Ham khoi tao progress bar cho mot batch encrypt/decrypt.
+    def start_progress(self, title, total):
+        self.progress_var.set(0)
+        self.progress_bar.configure(maximum=max(1, total))
+        self.progress_label.config(text=f"{title}: 0/{total}")
+        self.update_idletasks()
+
+    # Ham cap nhat progress sau moi file de user thay tien trinh realtime.
+    def step_progress(self, title, done, total, current_path=""):
+        self.progress_var.set(done)
+        tail = f" | {current_path}" if current_path else ""
+        self.progress_label.config(text=f"{title}: {done}/{total}{tail}")
+        self.update_idletasks()
+
+    # Ham ket thuc progress va dua thanh trang thai idle.
+    def finish_progress(self):
+        self.progress_label.config(text="Progress: idle")
+        self.progress_var.set(0)
+        self.update_idletasks()
+
+    # Ham mo thu muc output gan nhat de user xem file ket qua nhanh.
+    def open_last_output_folder(self):
+        if not self.last_output_dir:
+            messagebox.showinfo("Thong bao", "Chua co output folder nao duoc tao")
+            return
+
+        out_dir = Path(self.last_output_dir)
+        if not out_dir.exists():
+            messagebox.showerror("Loi", f"Thu muc khong ton tai: {out_dir}")
+            return
+
+        try:
+            subprocess.Popen(["xdg-open", str(out_dir)])
+        except Exception as exc:
+            messagebox.showerror("Loi", f"Khong mo duoc folder: {exc}")
+
+    def _build_mode_picker(self, parent, var, on_change):
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=(0, 8))
+        ttk.Label(row, text="Scope:").pack(side="left")
+        ttk.Radiobutton(row, text="Single file", variable=var, value="single", command=on_change).pack(side="left", padx=8)
+        ttk.Radiobutton(row, text="Multi file", variable=var, value="multi", command=on_change).pack(side="left", padx=8)
+        ttk.Radiobutton(row, text="Folder recursive", variable=var, value="folder", command=on_change).pack(side="left", padx=8)
+
+    def _build_encrypt_tab(self, parent):
+        self._build_mode_picker(parent, self.encrypt_mode, self.refresh_encrypt_targets)
+
+        btns = ttk.Frame(parent)
+        btns.pack(fill="x", pady=(0, 8))
+        ttk.Button(btns, text="Select Target", command=self.pick_encrypt_target).pack(side="left")
+        ttk.Button(btns, text="Generate Key From USB Mouse", command=self.generate_key_from_mouse).pack(side="left", padx=8)
+        ttk.Button(btns, text="Encrypt", command=self.run_encrypt).pack(side="left", padx=8)
+
+        self.enc_target_label = ttk.Label(parent, text="No target selected")
+        self.enc_target_label.pack(fill="x", pady=(0, 4))
+
+        self.key_label = ttk.Label(parent, text="Key status: not generated")
+        self.key_label.pack(fill="x", pady=(0, 8))
+
+        self.enc_list = tk.Listbox(parent, height=12)
+        self.enc_list.pack(fill="both", expand=True)
+
+    def _build_decrypt_tab(self, parent):
+        self._build_mode_picker(parent, self.decrypt_mode, self.refresh_decrypt_targets)
+
+        btns = ttk.Frame(parent)
+        btns.pack(fill="x", pady=(0, 8))
+        ttk.Button(btns, text="Select Target", command=self.pick_decrypt_target).pack(side="left")
+        ttk.Button(btns, text="Decrypt (Using Key File)", command=self.run_decrypt).pack(side="left", padx=8)
+
+        self.dec_target_label = ttk.Label(parent, text="No target selected")
+        self.dec_target_label.pack(fill="x", pady=(0, 8))
+
+        self.dec_list = tk.Listbox(parent, height=14)
+        self.dec_list.pack(fill="both", expand=True)
+
+    def log(self, msg):
+        self.log_box.insert("end", msg + "\n")
+        self.log_box.see("end")
+
+    # Ham query trang thai mouse_present tu CLI, tra ve True/False/None neu loi.
+    def query_mouse_present(self):
+        if not CLI_PATH.exists():
+            return None
+
+        res = run_cli(["status"])
+        if res.returncode != 0:
+            return None
+
+        status = parse_status_line(res.stdout.strip())
+        return status.get("mouse_present") == "1"
+
+    # Ham cap nhat nhan trang thai ket noi chuot tren GUI va log khi co thay doi.
+    def refresh_mouse_status_label(self):
+        mouse_present = self.query_mouse_present()
+
+        if mouse_present is None:
+            self.mouse_status_label.config(text="USB Mouse: Khong doc duoc status", fg="#aa0000")
+            return
+
+        if mouse_present:
+            self.mouse_status_label.config(text="USB Mouse: Da ket noi", fg="#0a7a1f")
+        else:
+            self.mouse_status_label.config(text="USB Mouse: Chua ket noi", fg="#aa0000")
+
+        if self.last_mouse_present is None:
+            self.last_mouse_present = mouse_present
+            return
+
+        if mouse_present != self.last_mouse_present:
+            if mouse_present:
+                self.log("USB Mouse status changed: DA KET NOI")
+            else:
+                self.log("USB Mouse status changed: DA RUT")
+            self.last_mouse_present = mouse_present
+
+    # Ham polling dinh ky de GUI tu dong phan anh cam/rut chuot theo thoi gian thuc.
+    def poll_mouse_status(self):
+        self.refresh_mouse_status_label()
+        self.after(1000, self.poll_mouse_status)
+
+    def pick_encrypt_target(self):
+        mode = self.encrypt_mode.get()
+        if mode == "single":
+            path = filedialog.askopenfilename(title="Chon file can encrypt")
+            if path:
+                self.encrypt_files = [path]
+                self.encrypt_folder = ""
+        elif mode == "multi":
+            paths = filedialog.askopenfilenames(title="Chon nhieu file can encrypt")
+            if paths:
+                self.encrypt_files = list(paths)
+                self.encrypt_folder = ""
+        else:
+            folder = filedialog.askdirectory(title="Chon folder can encrypt")
+            if folder:
+                self.encrypt_folder = folder
+                self.encrypt_files = []
+
+        self.refresh_encrypt_targets()
+
+    def refresh_encrypt_targets(self):
+        self.enc_list.delete(0, "end")
+        mode = self.encrypt_mode.get()
+        targets = collect_encrypt_targets(mode, self.encrypt_files, self.encrypt_folder)
+        for p in targets:
+            self.enc_list.insert("end", str(p))
+
+        if mode == "folder":
+            self.enc_target_label.config(text=f"Folder: {self.encrypt_folder or 'none'}")
+        else:
+            self.enc_target_label.config(text=f"Files: {len(targets)} selected")
+
+    def pick_decrypt_target(self):
+        mode = self.decrypt_mode.get()
+        if mode == "single":
+            path = filedialog.askopenfilename(title="Chon file .enc can decrypt")
+            if path:
+                self.decrypt_files = [path]
+                self.decrypt_folder = ""
+        elif mode == "multi":
+            paths = filedialog.askopenfilenames(title="Chon nhieu file .enc can decrypt")
+            if paths:
+                self.decrypt_files = list(paths)
+                self.decrypt_folder = ""
+        else:
+            folder = filedialog.askdirectory(title="Chon folder co file .enc")
+            if folder:
+                self.decrypt_folder = folder
+                self.decrypt_files = []
+
+        self.refresh_decrypt_targets()
+
+    def refresh_decrypt_targets(self):
+        self.dec_list.delete(0, "end")
+        mode = self.decrypt_mode.get()
+        targets = collect_decrypt_targets(mode, self.decrypt_files, self.decrypt_folder)
+        for p in targets:
+            self.dec_list.insert("end", str(p))
+
+        if mode == "folder":
+            self.dec_target_label.config(text=f"Folder: {self.decrypt_folder or 'none'}")
+        else:
+            self.dec_target_label.config(text=f"Files(.enc): {len(targets)} selected")
+
+    # Ham tao key hex random dua tren entropy tu du lieu di chuyen chuot USB.
+    def generate_key_from_mouse(self):
+        if not CLI_PATH.exists():
+            messagebox.showerror("Loi", "Khong tim thay crypto_mouse_cli. Hay build app truoc")
+            return
+
+        self.log("Dang thu key ngau nhien tu toa do chuot USB trong 5s... hay di chuyen chuot")
+        self.update_idletasks()
+
+        try:
+            key_hex = collect_mouse_entropy_key_hex(duration_sec=5)
+        except Exception as exc:
+            messagebox.showerror("Loi tao key", str(exc))
+            return
+
+        dlg = PassphraseDialog(self, "Dat passphrase cho secret.key")
+        self.wait_window(dlg)
+        if not dlg.result:
+            return
+
+        key_path = filedialog.asksaveasfilename(
+            title="Luu key file",
+            defaultextension=".key",
+            initialfile="secret.key",
+            filetypes=[("Key file", "*.key"), ("JSON", "*.json"), ("All", "*.*")],
+        )
+        if not key_path:
+            return
+
+        try:
+            encrypt_keyfile(key_hex, dlg.result, key_path)
+        except Exception as exc:
+            messagebox.showerror("Loi luu key file", str(exc))
+            return
+
+        self.generated_key_hex = key_hex
+        self.key_label.config(text=f"Key status: generated and saved -> {key_path}")
+        self.log(f"Key generated from USB mouse and saved: {key_path}")
+        messagebox.showinfo("Thanh cong", "Da tao va ma hoa key file thanh cong")
+
+    # Ham encrypt theo batch va cap nhat tien trinh theo tung file.
+    def run_encrypt(self):
+        if not self.generated_key_hex:
+            messagebox.showwarning("Can key", "Hay tao key tu chuot USB truoc")
+            return
+
+        targets = collect_encrypt_targets(self.encrypt_mode.get(), self.encrypt_files, self.encrypt_folder)
+        if not targets:
+            messagebox.showwarning("Can target", "Hay chon file/folder can encrypt")
+            return
+
+        ok = 0
+        skipped = 0
+        failed = []
+        total = len(targets)
+
+        self.start_progress("Encrypt", total)
+
+        for idx, in_path in enumerate(targets, start=1):
+            self.step_progress("Encrypt", idx, total, str(in_path))
+
+            if in_path.suffix == ".enc":
+                skipped += 1
+                continue
+
+            out_path = enc_output_path(in_path)
+            res = run_cli(["encrypt-file", self.generated_key_hex, str(in_path), str(out_path)])
+            if res.returncode == 0:
+                ok += 1
+                self.last_output_dir = str(out_path.parent)
+                self.log(f"ENCRYPT OK: {in_path} -> {out_path}")
+            else:
+                err = (res.stderr or res.stdout).strip()
+                failed.append((str(in_path), err))
+                self.log(f"ENCRYPT FAIL: {in_path}")
+
+        summary = f"Encrypt done. success={ok}, skipped={skipped}, failed={len(failed)}"
+        self.finish_progress()
+        self.log(summary)
+
+        if failed:
+            detail = "\n".join([f"- {p}: {e}" for p, e in failed[:8]])
+            messagebox.showwarning("Hoan tat co loi", summary + "\n" + detail)
+        else:
+            messagebox.showinfo("Hoan tat", summary)
+
+    # Ham decrypt theo batch, loi file nao chi dung file do va van tiep tuc file khac.
+    def run_decrypt(self):
+        if not CLI_PATH.exists():
+            messagebox.showerror("Loi", "Khong tim thay crypto_mouse_cli. Hay build app truoc")
+            return
+
+        targets = collect_decrypt_targets(self.decrypt_mode.get(), self.decrypt_files, self.decrypt_folder)
+        if not targets:
+            messagebox.showwarning("Can target", "Hay chon file .enc can decrypt")
+            return
+
+        dlg = KeyUnlockDialog(self)
+        self.wait_window(dlg)
+        if not dlg.result:
+            return
+
+        keyfile, passphrase = dlg.result
+        try:
+            key_hex = decrypt_keyfile(keyfile, passphrase)
+        except Exception as exc:
+            messagebox.showerror("Loi key file", f"Khong mo duoc key file: {exc}")
+            return
+
+        ok = 0
+        failed = []
+        total = len(targets)
+
+        self.start_progress("Decrypt", total)
+
+        for idx, in_path in enumerate(targets, start=1):
+            self.step_progress("Decrypt", idx, total, str(in_path))
+
+            out_path = dec_output_path(in_path)
+            res = run_cli(["decrypt-file", key_hex, str(in_path), str(out_path)])
+            if res.returncode == 0:
+                ok += 1
+                self.last_output_dir = str(out_path.parent)
+                self.log(f"DECRYPT OK: {in_path} -> {out_path}")
+            else:
+                err = (res.stderr or res.stdout).strip()
+                failed.append((str(in_path), err))
+                self.log(f"DECRYPT FAIL: {in_path}")
+
+        summary = f"Decrypt done. success={ok}, failed={len(failed)}"
+        self.finish_progress()
+        self.log(summary)
+
+        if failed:
+            detail = "\n".join([f"- {p}: {e}" for p, e in failed[:8]])
+            messagebox.showwarning("Hoan tat co loi", summary + "\n" + detail)
+        else:
+            messagebox.showinfo("Hoan tat", summary)
+
+
+def main():
+    if not CLI_PATH.exists():
+        print("Khong tim thay app/crypto_mouse_cli. Hay build app truoc: make -C app")
+    app = App()
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()
