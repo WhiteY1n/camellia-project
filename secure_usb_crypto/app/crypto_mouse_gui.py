@@ -6,8 +6,10 @@ import os
 import select
 import struct
 import subprocess
+import tempfile
 import time
 import tkinter as tk
+import zipfile
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -20,6 +22,7 @@ CLI_PATH = ROOT_DIR / "app" / "crypto_mouse_cli"
 KEYFILE_AAD = b"secure_usb_crypto:keyfile:v1"
 INPUT_EVENT_FMT = "llHHi"
 INPUT_EVENT_SIZE = struct.calcsize(INPUT_EVENT_FMT)
+DRIVER_MAX_DATA = 256 * 1024
 
 
 # Ham goi app CLI C hien co va tra ket qua stdout/stderr cho GUI xu ly.
@@ -197,37 +200,21 @@ def collect_mouse_entropy_key_hex(duration_sec=5):
     return digest[:16].hex()
 
 
-# Ham gom danh sach target encrypt theo mode single/multi/folder.
+# Ham gom danh sach target encrypt theo mode files/folder.
 def collect_encrypt_targets(mode, selected_files, selected_folder):
-    if mode == "single":
-        return [Path(selected_files[0])] if selected_files else []
-
-    if mode == "multi":
+    if mode == "files":
         return [Path(p) for p in selected_files]
 
     if mode == "folder":
-        if not selected_folder:
-            return []
-        all_files = []
-        for root, _, files in os.walk(selected_folder):
-            for name in files:
-                all_files.append(Path(root) / name)
-        return all_files
+        return [Path(selected_folder)] if selected_folder else []
 
     return []
 
 
-# Ham gom danh sach target decrypt va chi lay file co duoi .enc.
+# Ham gom danh sach target decrypt theo mode files/folder va chi lay file co duoi .enc.
 def collect_decrypt_targets(mode, selected_files, selected_folder):
     targets = []
-    if mode == "single":
-        if selected_files:
-            p = Path(selected_files[0])
-            if p.suffix == ".enc":
-                targets.append(p)
-        return targets
-
-    if mode == "multi":
+    if mode == "files":
         for p in selected_files:
             path = Path(p)
             if path.suffix == ".enc":
@@ -253,6 +240,34 @@ def dec_output_path(in_path):
     if in_path.suffix == ".enc":
         return in_path.with_suffix("")
     return in_path.with_name(in_path.name + ".dec")
+
+
+# Ham nen toan bo thu muc thanh mot file zip de ma hoa 1 lan.
+def zip_folder_to_file(folder_path, zip_path):
+    folder_path = Path(folder_path)
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(folder_path):
+            for name in files:
+                src = Path(root) / name
+                # Luu duong dan tu muc cha de giu ten thu muc goc khi giai nen.
+                arcname = src.relative_to(folder_path.parent)
+                zf.write(src, arcname=str(arcname))
+
+
+# Ham giai nen file zip sau khi decrypt, tra ve thu muc da giai nen.
+def extract_zip_to_folder(zip_path):
+    zip_path = Path(zip_path)
+    base_dir = zip_path.parent / zip_path.stem
+    out_dir = base_dir
+    idx = 1
+    while out_dir.exists():
+        out_dir = zip_path.parent / f"{base_dir.name}_extracted_{idx}"
+        idx += 1
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(out_dir)
+
+    return out_dir
 
 
 # Ham chon nhieu file theo kieu lap lai tung file, tranh phu thuoc multi-select native dialog.
@@ -372,8 +387,8 @@ class App(tk.Tk):
         self.title("Secure USB Crypto GUI")
         self.geometry("880x560")
 
-        self.encrypt_mode = tk.StringVar(value="single")
-        self.decrypt_mode = tk.StringVar(value="single")
+        self.encrypt_mode = tk.StringVar(value="files")
+        self.decrypt_mode = tk.StringVar(value="files")
         self.encrypt_files = []
         self.decrypt_files = []
         self.encrypt_folder = ""
@@ -458,8 +473,7 @@ class App(tk.Tk):
         row = ttk.Frame(parent)
         row.pack(fill="x", pady=(0, 8))
         ttk.Label(row, text="Scope:").pack(side="left")
-        ttk.Radiobutton(row, text="Single file", variable=var, value="single", command=on_change).pack(side="left", padx=8)
-        ttk.Radiobutton(row, text="Multi file", variable=var, value="multi", command=on_change).pack(side="left", padx=8)
+        ttk.Radiobutton(row, text="File(s)", variable=var, value="files", command=on_change).pack(side="left", padx=8)
         ttk.Radiobutton(row, text="Folder recursive", variable=var, value="folder", command=on_change).pack(side="left", padx=8)
 
     # Ham reset danh sach target o tab encrypt khi doi scope/chuyen tab.
@@ -566,12 +580,7 @@ class App(tk.Tk):
 
     def pick_encrypt_target(self):
         mode = self.encrypt_mode.get()
-        if mode == "single":
-            path = filedialog.askopenfilename(parent=self, title="Chon file can encrypt")
-            if path:
-                self.encrypt_files = [path]
-                self.encrypt_folder = ""
-        elif mode == "multi":
+        if mode == "files":
             native_paths = filedialog.askopenfilenames(
                 parent=self,
                 title="Chon nhieu file can encrypt",
@@ -584,7 +593,7 @@ class App(tk.Tk):
                     title="Chon file can encrypt (chon tung file)",
                 )
             if paths:
-                # O mode multi, moi lan bam Select Target se cong don them file moi.
+                # O mode files, moi lan bam Select Target se cong don them file moi.
                 existing = set(self.encrypt_files)
                 for p in paths:
                     if p not in existing:
@@ -613,16 +622,7 @@ class App(tk.Tk):
 
     def pick_decrypt_target(self):
         mode = self.decrypt_mode.get()
-        if mode == "single":
-            path = filedialog.askopenfilename(
-                parent=self,
-                title="Chon file .enc can decrypt",
-                filetypes=[("Encrypted file", "*.enc"), ("All files", "*.*")],
-            )
-            if path:
-                self.decrypt_files = [path]
-                self.decrypt_folder = ""
-        elif mode == "multi":
+        if mode == "files":
             native_paths = filedialog.askopenfilenames(
                 parent=self,
                 title="Chon nhieu file .enc can decrypt",
@@ -638,7 +638,7 @@ class App(tk.Tk):
                     must_enc=True,
                 )
             if paths:
-                # O mode multi, moi lan bam Select Target se cong don them file .enc moi.
+                # O mode files, moi lan bam Select Target se cong don them file .enc moi.
                 existing = set(self.decrypt_files)
                 for p in paths:
                     if p.endswith(".enc") and p not in existing:
@@ -711,7 +711,8 @@ class App(tk.Tk):
             messagebox.showwarning("Can key", "Hay tao key tu chuot USB truoc")
             return
 
-        targets = collect_encrypt_targets(self.encrypt_mode.get(), self.encrypt_files, self.encrypt_folder)
+        mode = self.encrypt_mode.get()
+        targets = collect_encrypt_targets(mode, self.encrypt_files, self.encrypt_folder)
         if not targets:
             messagebox.showwarning("Can target", "Hay chon file/folder can encrypt")
             return
@@ -725,6 +726,45 @@ class App(tk.Tk):
 
         for idx, in_path in enumerate(targets, start=1):
             self.step_progress("Encrypt", idx, total, str(in_path))
+
+            if mode == "folder":
+                if not in_path.exists() or not in_path.is_dir():
+                    failed.append((str(in_path), "Folder khong ton tai hoac khong hop le"))
+                    self.log(f"ENCRYPT FAIL: {in_path}")
+                    continue
+
+                tmp_zip = None
+                try:
+                    fd, tmp_name = tempfile.mkstemp(prefix="secure_usb_crypto_", suffix=".zip")
+                    os.close(fd)
+                    tmp_zip = Path(tmp_name)
+                    zip_folder_to_file(in_path, tmp_zip)
+
+                    zip_size = tmp_zip.stat().st_size
+                    if zip_size > DRIVER_MAX_DATA:
+                        failed.append(
+                            (
+                                str(in_path),
+                                f"Zip qua lon ({zip_size} bytes), gioi han driver la {DRIVER_MAX_DATA} bytes",
+                            )
+                        )
+                        self.log(f"ENCRYPT FAIL: {in_path}")
+                        continue
+
+                    out_path = in_path.parent / f"{in_path.name}.zip.enc"
+                    res = run_cli(["encrypt-file", self.generated_key_hex, str(tmp_zip), str(out_path)])
+                    if res.returncode == 0:
+                        ok += 1
+                        self.last_output_dir = str(out_path.parent)
+                        self.log(f"ENCRYPT OK: {in_path} -> {out_path}")
+                    else:
+                        err = (res.stderr or res.stdout).strip()
+                        failed.append((str(in_path), err))
+                        self.log(f"ENCRYPT FAIL: {in_path}")
+                finally:
+                    if tmp_zip and tmp_zip.exists():
+                        tmp_zip.unlink(missing_ok=True)
+                continue
 
             if in_path.suffix == ".enc":
                 skipped += 1
@@ -786,6 +826,14 @@ class App(tk.Tk):
             out_path = dec_output_path(in_path)
             res = run_cli(["decrypt-file", key_hex, str(in_path), str(out_path)])
             if res.returncode == 0:
+                if in_path.name.endswith(".zip.enc") and out_path.suffix == ".zip":
+                    try:
+                        extracted_dir = extract_zip_to_folder(out_path)
+                        self.log(f"UNZIP OK: {out_path} -> {extracted_dir}")
+                    except Exception as exc:
+                        failed.append((str(in_path), f"Decrypt ok nhung unzip loi: {exc}"))
+                        self.log(f"DECRYPT FAIL: {in_path}")
+                        continue
                 ok += 1
                 self.last_output_dir = str(out_path.parent)
                 self.log(f"DECRYPT OK: {in_path} -> {out_path}")

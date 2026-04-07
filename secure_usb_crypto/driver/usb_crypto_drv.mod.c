@@ -28,6 +28,7 @@ __used __section("__versions") = {
 	{ 0xa8f96c6e, "usb_deregister" },
 	{ 0x47886e07, "usb_unregister_notify" },
 	{ 0xd272d446, "__stack_chk_fail" },
+	{ 0x27683a56, "memset" },
 	{ 0xd5ad82a1, "misc_deregister" },
 	{ 0xe54e0a6b, "__fortify_panic" },
 	{ 0xa53f4e29, "memcpy" },
@@ -60,6 +61,7 @@ __used __section("__version_ext_crcs") = {
 	0xa8f96c6e,
 	0x47886e07,
 	0xd272d446,
+	0x27683a56,
 	0xd5ad82a1,
 	0xe54e0a6b,
 	0xa53f4e29,
@@ -91,6 +93,7 @@ __used __section("__version_ext_names") =
 	"usb_deregister\0"
 	"usb_unregister_notify\0"
 	"__stack_chk_fail\0"
+	"memset\0"
 	"misc_deregister\0"
 	"__fortify_panic\0"
 	"memcpy\0"

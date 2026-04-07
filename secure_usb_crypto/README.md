@@ -126,7 +126,7 @@ sudo dmesg | grep -Ei "crypto_mouse|usb_crypto_drv|notifier|encrypt|decrypt|deni
 ```
 
 ## 8) Luu y ky thuat
-- Ban hien tai gioi han du lieu 1 lan xu ly toi da `4096` bytes.
+- Ban hien tai gioi han du lieu 1 lan xu ly toi da `262144` bytes (256KB).
 - Che do ma hoa dang o muc demo hoc tap (ECB + PKCS#7), phu hop minh hoa de tai.
 - Neu can ban nang cao de bao cao an toan hon, co the nang cap CBC/XTS + IV + dinh dang file co header.
 
@@ -191,6 +191,7 @@ sudo python3 app/crypto_mouse_gui.py
 Ket qua:
 - File duoc tao them duoi `.enc`.
 - File da co duoi `.enc` se duoc bo qua trong batch/folder.
+- Neu scope la `Folder recursive`: GUI se nen ca thu muc thanh 1 file `.zip`, sau do ma hoa thanh `ten_thu_muc.zip.enc`.
 
 ### Luong Decrypt trong GUI
 1. Chon scope va chon target `.enc`.
@@ -199,10 +200,12 @@ Ket qua:
 4. GUI giai ma va tao file output:
 	- Neu input la `abc.txt.enc` -> output `abc.txt`
 	- Neu input khong dung duoi `.enc` -> output them `.dec`
+	- Neu input la `ten_thu_muc.zip.enc` -> output `ten_thu_muc.zip`, sau do GUI tu dong giai nen ra thu muc.
 
 ### Xu ly loi quan trong
 - Neu rut chuot USB key: driver se chan read/write/encrypt/decrypt.
 - Neu file `.enc` bi sua/hong: decrypt file do se bao loi va dung file do.
 - Trong batch/folder: file loi se duoc ghi vao tong ket, cac file khac van tiep tuc.
+- Gioi han driver hien tai la 262144 bytes/lan (256KB). Neu file zip cua folder vuot gioi han nay, GUI se bao loi va khong ma hoa duoc.
 
 

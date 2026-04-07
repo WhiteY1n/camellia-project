@@ -6,7 +6,7 @@
 
 #define CRYPTO_MOUSE_IOC_MAGIC 'k'
 
-#define CRYPTO_MOUSE_MAX_DATA 4096
+#define CRYPTO_MOUSE_MAX_DATA (256 * 1024)
 #define CRYPTO_MOUSE_MAX_KEY 32
 
 struct crypto_mouse_key {

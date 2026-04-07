@@ -114,19 +114,27 @@ static int cmd_setkey(int fd, const char *hex)
 
 static int cmd_write(int fd, const char *arg)
 {
-    uint8_t buf[CRYPTO_MOUSE_MAX_DATA];
+    uint8_t *buf;
     size_t len = 0;
     ssize_t wr;
 
+    buf = malloc(CRYPTO_MOUSE_MAX_DATA);
+    if (!buf) {
+        perror("malloc");
+        return 1;
+    }
+
     if (strncmp(arg, "0x", 2) == 0 || strncmp(arg, "0X", 2) == 0) {
-        if (parse_hex(arg, buf, sizeof(buf), &len) != 0) {
+        if (parse_hex(arg, buf, CRYPTO_MOUSE_MAX_DATA, &len) != 0) {
             fprintf(stderr, "Invalid hex payload\n");
+            free(buf);
             return 1;
         }
     } else {
         len = strlen(arg);
-        if (len > sizeof(buf)) {
+        if (len > CRYPTO_MOUSE_MAX_DATA) {
             fprintf(stderr, "Payload too large\n");
+            free(buf);
             return 1;
         }
         memcpy(buf, arg, len);
@@ -135,10 +143,12 @@ static int cmd_write(int fd, const char *arg)
     wr = write(fd, buf, len);
     if (wr < 0) {
         perror("write");
+        free(buf);
         return 1;
     }
 
     printf("write ok (%zd bytes)\n", wr);
+    free(buf);
     return 0;
 }
 
@@ -159,14 +169,21 @@ static int cmd_write_raw(int fd, const uint8_t *data, size_t len)
 
 static int cmd_read(int fd)
 {
-    uint8_t buf[CRYPTO_MOUSE_MAX_DATA];
+    uint8_t *buf;
     ssize_t rd;
     ssize_t i;
 
+    buf = malloc(CRYPTO_MOUSE_MAX_DATA);
+    if (!buf) {
+        perror("malloc");
+        return 1;
+    }
+
     lseek(fd, 0, SEEK_SET);
-    rd = read(fd, buf, sizeof(buf));
+    rd = read(fd, buf, CRYPTO_MOUSE_MAX_DATA);
     if (rd < 0) {
         perror("read");
+        free(buf);
         return 1;
     }
 
@@ -176,6 +193,7 @@ static int cmd_read(int fd)
         printf("%02x", buf[i]);
     printf("\n");
 
+    free(buf);
     return 0;
 }
 
@@ -268,64 +286,101 @@ static int save_file(const char *path, const uint8_t *buf, size_t len)
 static int cmd_file_crypto(int fd, const char *key_hex, const char *in_path,
                            const char *out_path, int do_encrypt)
 {
-    uint8_t inbuf[CRYPTO_MOUSE_MAX_DATA];
-    uint8_t outbuf[CRYPTO_MOUSE_MAX_DATA];
+    uint8_t *inbuf;
+    uint8_t *outbuf;
     struct crypto_mouse_status st;
     size_t in_len = 0;
     int rd_fd;
 
-    if (load_file(in_path, inbuf, sizeof(inbuf), &in_len) != 0) {
+    inbuf = malloc(CRYPTO_MOUSE_MAX_DATA);
+    outbuf = malloc(CRYPTO_MOUSE_MAX_DATA);
+    if (!inbuf || !outbuf) {
+        perror("malloc");
+        free(inbuf);
+        free(outbuf);
+        return 1;
+    }
+
+    if (load_file(in_path, inbuf, CRYPTO_MOUSE_MAX_DATA, &in_len) != 0) {
         perror("load input file");
+        free(inbuf);
+        free(outbuf);
         return 1;
     }
 
     if (cmd_setkey(fd, key_hex) != 0)
+    {
+        free(inbuf);
+        free(outbuf);
         return 1;
+    }
 
     if (cmd_write_raw(fd, inbuf, in_len) != 0) {
         perror("write device");
+        free(inbuf);
+        free(outbuf);
         return 1;
     }
 
     if (do_encrypt) {
         if (cmd_simple_ioctl(fd, CRYPTO_MOUSE_IOC_ENCRYPT, "ioctl(ENCRYPT)") != 0)
+        {
+            free(inbuf);
+            free(outbuf);
             return 1;
+        }
     } else {
         if (cmd_simple_ioctl(fd, CRYPTO_MOUSE_IOC_DECRYPT, "ioctl(DECRYPT)") != 0)
+        {
+            free(inbuf);
+            free(outbuf);
             return 1;
+        }
     }
 
     if (cmd_get_status(fd, &st) != 0) {
         perror("ioctl(GET_STATUS)");
+        free(inbuf);
+        free(outbuf);
         return 1;
     }
 
-    if (st.data_len > sizeof(outbuf)) {
+    if (st.data_len > CRYPTO_MOUSE_MAX_DATA) {
         fprintf(stderr, "driver data length too large: %u\n", st.data_len);
+        free(inbuf);
+        free(outbuf);
         return 1;
     }
 
     rd_fd = open(DEV_PATH, O_RDONLY);
     if (rd_fd < 0) {
         perror("open for read");
+        free(inbuf);
+        free(outbuf);
         return 1;
     }
 
     if (read_device_exact(rd_fd, outbuf, st.data_len) != 0) {
         close(rd_fd);
         perror("read device");
+        free(inbuf);
+        free(outbuf);
         return 1;
     }
     close(rd_fd);
 
     if (save_file(out_path, outbuf, st.data_len) != 0) {
         perror("save output file");
+        free(inbuf);
+        free(outbuf);
         return 1;
     }
 
     printf("file %s ok: %s -> %s (%u bytes)\n",
            do_encrypt ? "encrypt" : "decrypt",
            in_path, out_path, st.data_len);
+    free(inbuf);
+    free(outbuf);
     return 0;
 }
 
