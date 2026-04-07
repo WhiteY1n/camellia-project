@@ -22,7 +22,6 @@ CLI_PATH = ROOT_DIR / "app" / "crypto_mouse_cli"
 KEYFILE_AAD = b"secure_usb_crypto:keyfile:v1"
 INPUT_EVENT_FMT = "llHHi"
 INPUT_EVENT_SIZE = struct.calcsize(INPUT_EVENT_FMT)
-DRIVER_MAX_DATA = 256 * 1024
 
 
 # Ham goi app CLI C hien co va tra ket qua stdout/stderr cho GUI xu ly.
@@ -394,6 +393,7 @@ class App(tk.Tk):
         self.encrypt_folder = ""
         self.decrypt_folder = ""
         self.generated_key_hex = ""
+        self.active_key_path = ""
         self.last_output_dir = ""
         self.last_mouse_present = None
 
@@ -508,6 +508,9 @@ class App(tk.Tk):
         btns.pack(fill="x", pady=(0, 8))
         ttk.Button(btns, text="Select Target", command=self.pick_encrypt_target).pack(side="left")
         ttk.Button(btns, text="Generate Key From USB Mouse", command=self.generate_key_from_mouse).pack(side="left", padx=8)
+        ttk.Button(btns, text="Use Existing Key File", command=self.load_existing_key_for_encrypt).pack(
+            side="left", padx=8
+        )
         ttk.Button(btns, text="Encrypt", command=self.run_encrypt).pack(side="left", padx=8)
 
         self.enc_target_label = ttk.Label(parent, text="No target selected")
@@ -701,15 +704,46 @@ class App(tk.Tk):
             return
 
         self.generated_key_hex = key_hex
+        self.active_key_path = key_path
         self.key_label.config(text=f"Key status: generated and saved -> {key_path}")
         self.log(f"Key generated from USB mouse and saved: {key_path}")
         messagebox.showinfo("Thanh cong", "Da tao va ma hoa key file thanh cong")
 
+    # Ham nap lai key file cu de dung cho encrypt sau khi mo lai GUI.
+    def load_existing_key_for_encrypt(self):
+        if not CLI_PATH.exists():
+            messagebox.showerror("Loi", "Khong tim thay crypto_mouse_cli. Hay build app truoc")
+            return
+
+        dlg = KeyUnlockDialog(self)
+        self.wait_window(dlg)
+        if not dlg.result:
+            return
+
+        keyfile, passphrase = dlg.result
+        try:
+            key_hex = decrypt_keyfile(keyfile, passphrase)
+        except Exception as exc:
+            messagebox.showerror("Loi key file", f"Khong mo duoc key file: {exc}")
+            return
+
+        self.generated_key_hex = key_hex
+        self.active_key_path = keyfile
+        self.key_label.config(text=f"Key status: loaded from existing key file -> {keyfile}")
+        self.log(f"Key loaded for encrypt: {keyfile}")
+        messagebox.showinfo("Thanh cong", "Da nap key file cu, san sang encrypt")
+
     # Ham encrypt theo batch va cap nhat tien trinh theo tung file.
     def run_encrypt(self):
         if not self.generated_key_hex:
-            messagebox.showwarning("Can key", "Hay tao key tu chuot USB truoc")
-            return
+            if messagebox.askyesno(
+                "Can key",
+                "Chua co key dang hoat dong. Ban co muon nap key file cu de encrypt khong?",
+            ):
+                self.load_existing_key_for_encrypt()
+
+            if not self.generated_key_hex:
+                return
 
         mode = self.encrypt_mode.get()
         targets = collect_encrypt_targets(mode, self.encrypt_files, self.encrypt_folder)
@@ -739,17 +773,6 @@ class App(tk.Tk):
                     os.close(fd)
                     tmp_zip = Path(tmp_name)
                     zip_folder_to_file(in_path, tmp_zip)
-
-                    zip_size = tmp_zip.stat().st_size
-                    if zip_size > DRIVER_MAX_DATA:
-                        failed.append(
-                            (
-                                str(in_path),
-                                f"Zip qua lon ({zip_size} bytes), gioi han driver la {DRIVER_MAX_DATA} bytes",
-                            )
-                        )
-                        self.log(f"ENCRYPT FAIL: {in_path}")
-                        continue
 
                     out_path = in_path.parent / f"{in_path.name}.zip.enc"
                     res = run_cli(["encrypt-file", self.generated_key_hex, str(tmp_zip), str(out_path)])

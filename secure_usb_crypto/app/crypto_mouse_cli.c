@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <endian.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -11,6 +12,9 @@
 #include "../include/crypto_mouse_ioctl.h"
 
 #define DEV_PATH "/dev/crypto_mouse"
+#define CHUNK_STREAM_MAGIC "CMCHUNK1"
+#define CHUNK_STREAM_MAGIC_LEN 8
+#define ENC_CHUNK_PLAIN_MAX (CRYPTO_MOUSE_MAX_DATA - 16)
 
 static void usage(const char *prog)
 {
@@ -229,53 +233,96 @@ static int read_device_exact(int fd, uint8_t *buf, size_t len)
     return 0;
 }
 
-static int load_file(const char *path, uint8_t *buf, size_t max_len, size_t *out_len)
+static int read_device_blob(uint8_t *buf, size_t len)
 {
-    struct stat st;
-    FILE *fp;
-    size_t rd;
+    int rd_fd;
+    int rc;
 
-    if (stat(path, &st) != 0)
+    rd_fd = open(DEV_PATH, O_RDONLY);
+    if (rd_fd < 0)
         return -1;
 
-    if (!S_ISREG(st.st_mode)) {
-        errno = EINVAL;
-        return -1;
+    rc = read_device_exact(rd_fd, buf, len);
+    close(rd_fd);
+    return rc;
+}
+
+static int read_exact_file(FILE *fp, uint8_t *buf, size_t len)
+{
+    size_t off = 0;
+
+    while (off < len) {
+        size_t rd = fread(buf + off, 1, len - off, fp);
+        if (rd == 0) {
+            if (ferror(fp))
+                return -1;
+            break;
+        }
+        off += rd;
     }
 
-    if (st.st_size < 0 || (size_t)st.st_size > max_len) {
-        errno = EMSGSIZE;
-        return -1;
-    }
-
-    fp = fopen(path, "rb");
-    if (!fp)
-        return -1;
-
-    rd = fread(buf, 1, (size_t)st.st_size, fp);
-    if (rd != (size_t)st.st_size) {
-        fclose(fp);
+    if (off != len) {
         errno = EIO;
         return -1;
     }
 
-    fclose(fp);
-    *out_len = rd;
+    return 0;
+}
+
+static int write_exact_file(FILE *fp, const uint8_t *buf, size_t len)
+{
+    if (fwrite(buf, 1, len, fp) != len) {
+        errno = EIO;
+        return -1;
+    }
+
+    return 0;
+}
+
+static int write_chunk_header(FILE *fp, uint32_t plain_len, uint32_t cipher_len)
+{
+    uint32_t hdr[2];
+
+    hdr[0] = htole32(plain_len);
+    hdr[1] = htole32(cipher_len);
+
+    return write_exact_file(fp, (const uint8_t *)hdr, sizeof(hdr));
+}
+
+static int read_chunk_header(FILE *fp, uint32_t *plain_len, uint32_t *cipher_len,
+                             int *is_eof)
+{
+    uint8_t raw[8];
+    size_t rd;
+
+    *is_eof = 0;
+    rd = fread(raw, 1, sizeof(raw), fp);
+    if (rd == 0) {
+        if (ferror(fp))
+            return -1;
+        *is_eof = 1;
+        return 0;
+    }
+
+    if (rd != sizeof(raw)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    *plain_len = le32toh(*(uint32_t *)&raw[0]);
+    *cipher_len = le32toh(*(uint32_t *)&raw[4]);
     return 0;
 }
 
 static int save_file(const char *path, const uint8_t *buf, size_t len)
 {
     FILE *fp = fopen(path, "wb");
-    size_t wr;
 
     if (!fp)
         return -1;
 
-    wr = fwrite(buf, 1, len, fp);
-    if (wr != len) {
+    if (write_exact_file(fp, buf, len) != 0) {
         fclose(fp);
-        errno = EIO;
         return -1;
     }
 
@@ -283,15 +330,131 @@ static int save_file(const char *path, const uint8_t *buf, size_t len)
     return 0;
 }
 
-static int cmd_file_crypto(int fd, const char *key_hex, const char *in_path,
-                           const char *out_path, int do_encrypt)
+static int cmd_file_encrypt_chunked(int fd, const char *key_hex,
+                                    const char *in_path, const char *out_path)
 {
     uint8_t *inbuf;
     uint8_t *outbuf;
     struct crypto_mouse_status st;
-    size_t in_len = 0;
-    int rd_fd;
+    FILE *fin;
+    FILE *fout;
+    size_t in_len;
+    int rc = 1;
 
+    inbuf = malloc(ENC_CHUNK_PLAIN_MAX);
+    outbuf = malloc(CRYPTO_MOUSE_MAX_DATA);
+    if (!inbuf || !outbuf) {
+        perror("malloc");
+        free(inbuf);
+        free(outbuf);
+        return 1;
+    }
+
+    fin = fopen(in_path, "rb");
+    if (!fin) {
+        perror("open input file");
+        free(inbuf);
+        free(outbuf);
+        return 1;
+    }
+
+    fout = fopen(out_path, "wb");
+    if (!fout) {
+        perror("open output file");
+        fclose(fin);
+        free(inbuf);
+        free(outbuf);
+        return 1;
+    }
+
+    if (write_exact_file(fout, (const uint8_t *)CHUNK_STREAM_MAGIC,
+                         CHUNK_STREAM_MAGIC_LEN) != 0) {
+        perror("write output header");
+        goto out;
+    }
+
+    if (cmd_setkey(fd, key_hex) != 0) {
+        goto out;
+    }
+
+    while ((in_len = fread(inbuf, 1, ENC_CHUNK_PLAIN_MAX, fin)) > 0) {
+        if (cmd_write_raw(fd, inbuf, in_len) != 0) {
+            perror("write device");
+            goto out;
+        }
+
+        if (cmd_simple_ioctl(fd, CRYPTO_MOUSE_IOC_ENCRYPT, "ioctl(ENCRYPT)") != 0)
+            goto out;
+
+        if (cmd_get_status(fd, &st) != 0) {
+            perror("ioctl(GET_STATUS)");
+            goto out;
+        }
+
+        if (st.data_len > CRYPTO_MOUSE_MAX_DATA || st.data_len == 0) {
+            fprintf(stderr, "driver data length invalid: %u\n", st.data_len);
+            goto out;
+        }
+
+        if (read_device_blob(outbuf, st.data_len) != 0) {
+            perror("read device");
+            goto out;
+        }
+
+        if (write_chunk_header(fout, (uint32_t)in_len, st.data_len) != 0) {
+            perror("write chunk header");
+            goto out;
+        }
+
+        if (write_exact_file(fout, outbuf, st.data_len) != 0) {
+            perror("write chunk data");
+            goto out;
+        }
+    }
+
+    if (ferror(fin)) {
+        perror("read input file");
+        goto out;
+    }
+
+    rc = 0;
+
+out:
+    fclose(fin);
+    fclose(fout);
+    free(inbuf);
+    free(outbuf);
+
+    if (rc != 0)
+        unlink(out_path);
+
+    if (rc == 0)
+        printf("file encrypt ok (chunked): %s -> %s\n", in_path, out_path);
+
+    return rc;
+}
+
+static int cmd_file_decrypt_legacy(int fd, const char *key_hex, const char *in_path,
+                                   const char *out_path)
+{
+    uint8_t *inbuf;
+    uint8_t *outbuf;
+    struct stat st_file;
+    struct crypto_mouse_status st;
+    size_t in_len;
+
+    if (stat(in_path, &st_file) != 0) {
+        perror("stat input file");
+        return 1;
+    }
+
+    if (!S_ISREG(st_file.st_mode) || st_file.st_size < 0 ||
+        (size_t)st_file.st_size > CRYPTO_MOUSE_MAX_DATA) {
+        fprintf(stderr, "legacy input size unsupported\n");
+        return 1;
+    }
+
+    in_len = (size_t)st_file.st_size;
     inbuf = malloc(CRYPTO_MOUSE_MAX_DATA);
     outbuf = malloc(CRYPTO_MOUSE_MAX_DATA);
     if (!inbuf || !outbuf) {
@@ -301,15 +464,25 @@ static int cmd_file_crypto(int fd, const char *key_hex, const char *in_path,
         return 1;
     }
 
-    if (load_file(in_path, inbuf, CRYPTO_MOUSE_MAX_DATA, &in_len) != 0) {
-        perror("load input file");
-        free(inbuf);
-        free(outbuf);
-        return 1;
+    {
+        FILE *fp = fopen(in_path, "rb");
+        if (!fp) {
+            perror("open input file");
+            free(inbuf);
+            free(outbuf);
+            return 1;
+        }
+        if (read_exact_file(fp, inbuf, in_len) != 0) {
+            perror("read input file");
+            fclose(fp);
+            free(inbuf);
+            free(outbuf);
+            return 1;
+        }
+        fclose(fp);
     }
 
-    if (cmd_setkey(fd, key_hex) != 0)
-    {
+    if (cmd_setkey(fd, key_hex) != 0) {
         free(inbuf);
         free(outbuf);
         return 1;
@@ -322,20 +495,10 @@ static int cmd_file_crypto(int fd, const char *key_hex, const char *in_path,
         return 1;
     }
 
-    if (do_encrypt) {
-        if (cmd_simple_ioctl(fd, CRYPTO_MOUSE_IOC_ENCRYPT, "ioctl(ENCRYPT)") != 0)
-        {
-            free(inbuf);
-            free(outbuf);
-            return 1;
-        }
-    } else {
-        if (cmd_simple_ioctl(fd, CRYPTO_MOUSE_IOC_DECRYPT, "ioctl(DECRYPT)") != 0)
-        {
-            free(inbuf);
-            free(outbuf);
-            return 1;
-        }
+    if (cmd_simple_ioctl(fd, CRYPTO_MOUSE_IOC_DECRYPT, "ioctl(DECRYPT)") != 0) {
+        free(inbuf);
+        free(outbuf);
+        return 1;
     }
 
     if (cmd_get_status(fd, &st) != 0) {
@@ -352,22 +515,12 @@ static int cmd_file_crypto(int fd, const char *key_hex, const char *in_path,
         return 1;
     }
 
-    rd_fd = open(DEV_PATH, O_RDONLY);
-    if (rd_fd < 0) {
-        perror("open for read");
-        free(inbuf);
-        free(outbuf);
-        return 1;
-    }
-
-    if (read_device_exact(rd_fd, outbuf, st.data_len) != 0) {
-        close(rd_fd);
+    if (read_device_blob(outbuf, st.data_len) != 0) {
         perror("read device");
         free(inbuf);
         free(outbuf);
         return 1;
     }
-    close(rd_fd);
 
     if (save_file(out_path, outbuf, st.data_len) != 0) {
         perror("save output file");
@@ -376,12 +529,147 @@ static int cmd_file_crypto(int fd, const char *key_hex, const char *in_path,
         return 1;
     }
 
-    printf("file %s ok: %s -> %s (%u bytes)\n",
-           do_encrypt ? "encrypt" : "decrypt",
+    printf("file decrypt ok (legacy): %s -> %s (%u bytes)\n",
            in_path, out_path, st.data_len);
     free(inbuf);
     free(outbuf);
     return 0;
+}
+
+static int cmd_file_decrypt_chunked(int fd, const char *key_hex,
+                                    const char *in_path, const char *out_path)
+{
+    uint8_t *inbuf;
+    uint8_t *outbuf;
+    uint8_t magic[CHUNK_STREAM_MAGIC_LEN];
+    struct crypto_mouse_status st;
+    FILE *fin;
+    FILE *fout;
+    int rc = 1;
+
+    inbuf = malloc(CRYPTO_MOUSE_MAX_DATA);
+    outbuf = malloc(CRYPTO_MOUSE_MAX_DATA);
+    if (!inbuf || !outbuf) {
+        perror("malloc");
+        free(inbuf);
+        free(outbuf);
+        return 1;
+    }
+
+    fin = fopen(in_path, "rb");
+    if (!fin) {
+        perror("open input file");
+        free(inbuf);
+        free(outbuf);
+        return 1;
+    }
+
+    if (read_exact_file(fin, magic, sizeof(magic)) != 0) {
+        fclose(fin);
+        free(inbuf);
+        free(outbuf);
+        return cmd_file_decrypt_legacy(fd, key_hex, in_path, out_path);
+    }
+
+    if (memcmp(magic, CHUNK_STREAM_MAGIC, CHUNK_STREAM_MAGIC_LEN) != 0) {
+        fclose(fin);
+        free(inbuf);
+        free(outbuf);
+        return cmd_file_decrypt_legacy(fd, key_hex, in_path, out_path);
+    }
+
+    fout = fopen(out_path, "wb");
+    if (!fout) {
+        perror("open output file");
+        fclose(fin);
+        free(inbuf);
+        free(outbuf);
+        return 1;
+    }
+
+    if (cmd_setkey(fd, key_hex) != 0)
+        goto out;
+
+    for (;;) {
+        uint32_t plain_len = 0;
+        uint32_t cipher_len = 0;
+        int is_eof = 0;
+
+        if (read_chunk_header(fin, &plain_len, &cipher_len, &is_eof) != 0) {
+            perror("read chunk header");
+            goto out;
+        }
+
+        if (is_eof)
+            break;
+
+        if (cipher_len == 0 || cipher_len > CRYPTO_MOUSE_MAX_DATA ||
+            (cipher_len % 16) != 0 || plain_len > cipher_len) {
+            fprintf(stderr, "invalid chunk header: plain=%u cipher=%u\n",
+                    plain_len, cipher_len);
+            goto out;
+        }
+
+        if (read_exact_file(fin, inbuf, cipher_len) != 0) {
+            perror("read chunk data");
+            goto out;
+        }
+
+        if (cmd_write_raw(fd, inbuf, cipher_len) != 0) {
+            perror("write device");
+            goto out;
+        }
+
+        if (cmd_simple_ioctl(fd, CRYPTO_MOUSE_IOC_DECRYPT, "ioctl(DECRYPT)") != 0)
+            goto out;
+
+        if (cmd_get_status(fd, &st) != 0) {
+            perror("ioctl(GET_STATUS)");
+            goto out;
+        }
+
+        if (st.data_len > CRYPTO_MOUSE_MAX_DATA || st.data_len != plain_len) {
+            fprintf(stderr,
+                    "driver/plain mismatch: plain=%u driver=%u\n",
+                    plain_len, st.data_len);
+            goto out;
+        }
+
+        if (read_device_blob(outbuf, st.data_len) != 0) {
+            perror("read device");
+            goto out;
+        }
+
+        if (write_exact_file(fout, outbuf, st.data_len) != 0) {
+            perror("write output file");
+            goto out;
+        }
+    }
+
+    rc = 0;
+
+out:
+    fclose(fin);
+    fclose(fout);
+    free(inbuf);
+    free(outbuf);
+
+    if (rc != 0)
+        unlink(out_path);
+
+    if (rc == 0)
+        printf("file decrypt ok (chunked): %s -> %s\n", in_path, out_path);
+
+    return rc;
+}
+
+static int cmd_file_crypto(int fd, const char *key_hex, const char *in_path,
+                           const char *out_path, int do_encrypt)
+{
+    if (do_encrypt)
+        return cmd_file_encrypt_chunked(fd, key_hex, in_path, out_path);
+
+    return cmd_file_decrypt_chunked(fd, key_hex, in_path, out_path);
 }
 
 int main(int argc, char **argv)

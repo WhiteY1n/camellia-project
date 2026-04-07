@@ -126,7 +126,7 @@ sudo dmesg | grep -Ei "crypto_mouse|usb_crypto_drv|notifier|encrypt|decrypt|deni
 ```
 
 ## 8) Luu y ky thuat
-- Ban hien tai gioi han du lieu 1 lan xu ly toi da `262144` bytes (256KB).
+- Driver van xu ly tung block toi da `262144` bytes/lan, nhung CLI da chia chunk khi encrypt/decrypt file nen co the xu ly file lon hon gioi han nay.
 - Che do ma hoa dang o muc demo hoc tap (ECB + PKCS#7), phu hop minh hoa de tai.
 - Neu can ban nang cao de bao cao an toan hon, co the nang cap CBC/XTS + IV + dinh dang file co header.
 
@@ -181,7 +181,7 @@ sudo python3 app/crypto_mouse_gui.py
 - GUI tu dong cap nhat trang thai USB mouse (cam/rut) theo thoi gian thuc, khong can bam `Check Status`.
 
 ### Luong Encrypt trong GUI
-1. Chon scope: Single file / Multi file / Folder recursive.
+1. Chon scope: File(s) / Folder recursive.
 2. Bam `Select Target` de chon file/folder.
 3. Bam `Generate Key From USB Mouse`.
 4. Di chuyen chuot trong 5 giay.
@@ -206,6 +206,6 @@ Ket qua:
 - Neu rut chuot USB key: driver se chan read/write/encrypt/decrypt.
 - Neu file `.enc` bi sua/hong: decrypt file do se bao loi va dung file do.
 - Trong batch/folder: file loi se duoc ghi vao tong ket, cac file khac van tiep tuc.
-- Gioi han driver hien tai la 262144 bytes/lan (256KB). Neu file zip cua folder vuot gioi han nay, GUI se bao loi va khong ma hoa duoc.
+- Encrypt/decrypt file trong GUI da su dung co che chunk cua CLI, nen khong con bi chan boi gioi han tong kich thuoc file.
 
 
