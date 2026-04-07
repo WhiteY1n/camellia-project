@@ -255,6 +255,31 @@ def dec_output_path(in_path):
     return in_path.with_name(in_path.name + ".dec")
 
 
+# Ham chon nhieu file theo kieu lap lai tung file, tranh phu thuoc multi-select native dialog.
+def pick_files_one_by_one(parent, title, filetypes=None, must_enc=False):
+    selected = []
+    seen = set()
+
+    while True:
+        path = filedialog.askopenfilename(parent=parent, title=title, filetypes=filetypes)
+        if not path:
+            break
+
+        p = Path(path)
+        if must_enc and p.suffix != ".enc":
+            messagebox.showwarning("Canh bao", f"Bo qua file khong phai .enc: {p}", parent=parent)
+        else:
+            key = str(p)
+            if key not in seen:
+                seen.add(key)
+                selected.append(key)
+
+        if not messagebox.askyesno("Chon tiep", "Ban co muon them file nua khong?", parent=parent):
+            break
+
+    return selected
+
+
 class PassphraseDialog(tk.Toplevel):
     def __init__(self, parent, title_text):
         super().__init__(parent)
@@ -371,11 +396,13 @@ class App(tk.Tk):
         self.mouse_status_label.pack(side="left", padx=12)
         notebook = ttk.Notebook(self)
         notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.notebook = notebook
 
         enc_tab = ttk.Frame(notebook, padding=10)
         dec_tab = ttk.Frame(notebook, padding=10)
         notebook.add(enc_tab, text="Encrypt")
         notebook.add(dec_tab, text="Decrypt")
+        notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
 
         self._build_encrypt_tab(enc_tab)
         self._build_decrypt_tab(dec_tab)
@@ -435,8 +462,33 @@ class App(tk.Tk):
         ttk.Radiobutton(row, text="Multi file", variable=var, value="multi", command=on_change).pack(side="left", padx=8)
         ttk.Radiobutton(row, text="Folder recursive", variable=var, value="folder", command=on_change).pack(side="left", padx=8)
 
+    # Ham reset danh sach target o tab encrypt khi doi scope/chuyen tab.
+    def reset_encrypt_selection(self):
+        self.encrypt_files = []
+        self.encrypt_folder = ""
+        self.refresh_encrypt_targets()
+
+    # Ham reset danh sach target o tab decrypt khi doi scope/chuyen tab.
+    def reset_decrypt_selection(self):
+        self.decrypt_files = []
+        self.decrypt_folder = ""
+        self.refresh_decrypt_targets()
+
+    # Ham xu ly doi scope Encrypt: reset target cu de tranh giu file khong mong muon.
+    def on_encrypt_mode_change(self):
+        self.reset_encrypt_selection()
+
+    # Ham xu ly doi scope Decrypt: reset target cu de tranh giu file khong mong muon.
+    def on_decrypt_mode_change(self):
+        self.reset_decrypt_selection()
+
+    # Ham xu ly doi tab Encrypt/Decrypt: reset danh sach da chon de user chon moi.
+    def on_tab_changed(self, _event):
+        self.reset_encrypt_selection()
+        self.reset_decrypt_selection()
+
     def _build_encrypt_tab(self, parent):
-        self._build_mode_picker(parent, self.encrypt_mode, self.refresh_encrypt_targets)
+        self._build_mode_picker(parent, self.encrypt_mode, self.on_encrypt_mode_change)
 
         btns = ttk.Frame(parent)
         btns.pack(fill="x", pady=(0, 8))
@@ -454,7 +506,7 @@ class App(tk.Tk):
         self.enc_list.pack(fill="both", expand=True)
 
     def _build_decrypt_tab(self, parent):
-        self._build_mode_picker(parent, self.decrypt_mode, self.refresh_decrypt_targets)
+        self._build_mode_picker(parent, self.decrypt_mode, self.on_decrypt_mode_change)
 
         btns = ttk.Frame(parent)
         btns.pack(fill="x", pady=(0, 8))
@@ -515,17 +567,32 @@ class App(tk.Tk):
     def pick_encrypt_target(self):
         mode = self.encrypt_mode.get()
         if mode == "single":
-            path = filedialog.askopenfilename(title="Chon file can encrypt")
+            path = filedialog.askopenfilename(parent=self, title="Chon file can encrypt")
             if path:
                 self.encrypt_files = [path]
                 self.encrypt_folder = ""
         elif mode == "multi":
-            paths = filedialog.askopenfilenames(title="Chon nhieu file can encrypt")
+            native_paths = filedialog.askopenfilenames(
+                parent=self,
+                title="Chon nhieu file can encrypt",
+            )
+            if native_paths:
+                paths = list(native_paths)
+            else:
+                paths = pick_files_one_by_one(
+                    parent=self,
+                    title="Chon file can encrypt (chon tung file)",
+                )
             if paths:
-                self.encrypt_files = list(paths)
+                # O mode multi, moi lan bam Select Target se cong don them file moi.
+                existing = set(self.encrypt_files)
+                for p in paths:
+                    if p not in existing:
+                        self.encrypt_files.append(p)
+                        existing.add(p)
                 self.encrypt_folder = ""
         else:
-            folder = filedialog.askdirectory(title="Chon folder can encrypt")
+            folder = filedialog.askdirectory(parent=self, title="Chon folder can encrypt")
             if folder:
                 self.encrypt_folder = folder
                 self.encrypt_files = []
@@ -547,17 +614,39 @@ class App(tk.Tk):
     def pick_decrypt_target(self):
         mode = self.decrypt_mode.get()
         if mode == "single":
-            path = filedialog.askopenfilename(title="Chon file .enc can decrypt")
+            path = filedialog.askopenfilename(
+                parent=self,
+                title="Chon file .enc can decrypt",
+                filetypes=[("Encrypted file", "*.enc"), ("All files", "*.*")],
+            )
             if path:
                 self.decrypt_files = [path]
                 self.decrypt_folder = ""
         elif mode == "multi":
-            paths = filedialog.askopenfilenames(title="Chon nhieu file .enc can decrypt")
+            native_paths = filedialog.askopenfilenames(
+                parent=self,
+                title="Chon nhieu file .enc can decrypt",
+                filetypes=[("Encrypted file", "*.enc"), ("All files", "*.*")],
+            )
+            if native_paths:
+                paths = list(native_paths)
+            else:
+                paths = pick_files_one_by_one(
+                    parent=self,
+                    title="Chon file .enc can decrypt (chon tung file)",
+                    filetypes=[("Encrypted file", "*.enc"), ("All files", "*.*")],
+                    must_enc=True,
+                )
             if paths:
-                self.decrypt_files = list(paths)
+                # O mode multi, moi lan bam Select Target se cong don them file .enc moi.
+                existing = set(self.decrypt_files)
+                for p in paths:
+                    if p.endswith(".enc") and p not in existing:
+                        self.decrypt_files.append(p)
+                        existing.add(p)
                 self.decrypt_folder = ""
         else:
-            folder = filedialog.askdirectory(title="Chon folder co file .enc")
+            folder = filedialog.askdirectory(parent=self, title="Chon folder co file .enc")
             if folder:
                 self.decrypt_folder = folder
                 self.decrypt_files = []
