@@ -22,6 +22,24 @@ Du an minh hoa co che "USB mouse = physical key" de quan ly file bao mat tren Ub
 - User app CLI: `app/crypto_mouse_cli.c`
 - Device node: `/dev/crypto_mouse`
 
+## 2.1) Ban do luong chay ngan
+
+Luong tong quat:
+- User (CLI/GUI) -> /dev/crypto_mouse -> ioctl/read/write -> Driver (Camellia) -> ket qua tra ve app.
+- Dieu kien mo khoa: USB mouse dung VID/PID dang cam.
+- Rut mouse: driver tra loi EACCES va zeroize key/data.
+
+Luong encrypt-file:
+- input file -> CLI cat chunk (toi da MAX_DATA - 16)
+- moi chunk: write(device) -> ioctl(ENCRYPT) -> GET_STATUS lay data_len -> read(device)
+- CLI ghi ra output theo stream: [CMCHUNK1][plain_len][cipher_len][cipher_bytes]...
+
+Luong decrypt-file:
+- CLI doc magic dau file:
+- Neu la CMCHUNK1: lap theo chunk -> write(device) -> ioctl(DECRYPT) -> GET_STATUS -> read(device) -> ghi plain ra file.
+- Neu khong phai CMCHUNK1: fallback ve che do legacy (1 blob <= MAX_DATA).
+- Neu padding/du lieu sai: driver tra loi loi (thuong EBADMSG/EINVAL), CLI dung file loi do.
+
 ## 3) Build
 
 ### Build driver
