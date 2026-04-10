@@ -3,7 +3,6 @@ import base64
 import hashlib
 import json
 import os
-import select
 import struct
 import subprocess
 import tempfile
@@ -20,8 +19,7 @@ from cryptography.hazmat.primitives import hashes
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CLI_PATH = ROOT_DIR / "app" / "crypto_mouse_cli"
 KEYFILE_AAD = b"secure_usb_crypto:keyfile:v1"
-INPUT_EVENT_FMT = "llHHi"
-INPUT_EVENT_SIZE = struct.calcsize(INPUT_EVENT_FMT)
+MOUSE_ENTROPY_PROC = Path("/proc/mouse_entropy")
 
 
 # Ham goi app CLI C hien co va tra ket qua stdout/stderr cho GUI xu ly.
@@ -150,49 +148,92 @@ def find_usb_mouse_event_device():
     return Path("/dev/input") / candidates[0].name
 
 
-# Ham lay entropy tu su kien chuot USB trong 5 giay va bam SHA-256 sinh key.
-def collect_mouse_entropy_key_hex(duration_sec=5):
-    event_dev = find_usb_mouse_event_device()
-    if not event_dev:
-        raise RuntimeError("Khong tim thay event device cua USB mouse VID:PID 1a81:101f")
+def parse_proc_entropy_line(line):
+    # Dinh dang line: [sec.msec] dx=... dy=...
+    raw = line.strip()
+    if not raw.startswith("[") or "]" not in raw:
+        return None
 
-    fd = os.open(str(event_dev), os.O_RDONLY | os.O_NONBLOCK)
-    deadline = time.time() + duration_sec
-    material = bytearray()
-    x = 0
-    y = 0
+    ts_part, _, rest = raw.partition("]")
+    ts_part = ts_part[1:]
+    if "." not in ts_part:
+        return None
+
+    sec_s, msec_s = ts_part.split(".", 1)
+    sec_s = sec_s.strip()
+    msec_s = msec_s.strip()
+    if not sec_s or not msec_s:
+        return None
+
+    vals = {}
+    for token in rest.strip().split():
+        if "=" not in token:
+            continue
+        k, v = token.split("=", 1)
+        vals[k.strip()] = v.strip()
+
+    if "dx" not in vals or "dy" not in vals:
+        return None
 
     try:
-        while time.time() < deadline:
-            remaining = max(0.0, deadline - time.time())
-            rlist, _, _ = select.select([fd], [], [], min(0.2, remaining))
-            if not rlist:
+        sec = int(sec_s)
+        msec = int(msec_s)
+        dx = int(vals["dx"])
+        dy = int(vals["dy"])
+    except ValueError:
+        return None
+
+    return sec, msec, dx, dy
+
+
+def read_proc_entropy_samples():
+    try:
+        lines = MOUSE_ENTROPY_PROC.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return None
+
+    samples = []
+    for line in lines:
+        sample = parse_proc_entropy_line(line)
+        if sample:
+            samples.append(sample)
+    return samples
+
+
+# Ham lay entropy tu driver mouse_input_filter qua /proc/mouse_entropy trong 5 giay.
+def collect_mouse_entropy_key_hex(duration_sec=5):
+    if not MOUSE_ENTROPY_PROC.exists():
+        raise RuntimeError(
+            "Khong tim thay /proc/mouse_entropy. Hay nap module mouse_input_filter truoc"
+        )
+
+    baseline = read_proc_entropy_samples()
+    if baseline is None:
+        raise RuntimeError("Khong doc duoc /proc/mouse_entropy. Hay chay GUI bang sudo")
+
+    seen = set(baseline)
+    collected = []
+    deadline = time.time() + duration_sec
+
+    while time.time() < deadline:
+        time.sleep(0.2)
+        current = read_proc_entropy_samples()
+        if current is None:
+            continue
+        for sample in current:
+            if sample in seen:
                 continue
+            seen.add(sample)
+            collected.append(sample)
 
-            chunk = os.read(fd, INPUT_EVENT_SIZE * 64)
-            if not chunk:
-                continue
-
-            for i in range(0, len(chunk), INPUT_EVENT_SIZE):
-                ev = chunk[i : i + INPUT_EVENT_SIZE]
-                if len(ev) != INPUT_EVENT_SIZE:
-                    continue
-                sec, usec, ev_type, code, value = struct.unpack(INPUT_EVENT_FMT, ev)
-
-                if ev_type in (0x02, 0x03):
-                    if code == 0:
-                        x += value
-                    elif code == 1:
-                        y += value
-
-                material.extend(struct.pack("<qiii", int(sec), int(usec), int(x), int(y)))
-
-    finally:
-        os.close(fd)
+    material = bytearray()
+    for sec, msec, dx, dy in collected:
+        usec = msec * 1000
+        material.extend(struct.pack("<qiii", int(sec), int(usec), int(dx), int(dy)))
 
     if len(material) < 128:
         raise RuntimeError(
-            f"Khong du du lieu chuot tu {event_dev}. Hay di chuyen chuot trong luc tao key"
+            "Khong du mau tu /proc/mouse_entropy. Hay di chuyen chuot trong luc tao key"
         )
 
     digest = hashlib.sha256(bytes(material)).digest()
@@ -801,7 +842,7 @@ class App(tk.Tk):
             messagebox.showerror("Loi", "Khong tim thay crypto_mouse_cli. Hay build app truoc")
             return
 
-        self.log("Dang thu key ngau nhien tu toa do chuot USB trong 5s... hay di chuyen chuot")
+        self.log("Dang thu key ngau nhien tu /proc/mouse_entropy trong 5s... hay di chuyen chuot")
         self.update_idletasks()
 
         try:

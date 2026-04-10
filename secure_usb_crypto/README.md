@@ -186,11 +186,18 @@ make -C app
 ```
 
 ### Chay GUI
-Luu y: de lay entropy tu su kien chuot USB (`/dev/input/eventX`), nen chay bang sudo.
+Luu y: de lay entropy tu driver `mouse_input_filter` qua `/proc/mouse_entropy`, nen chay bang sudo va can nap module `mouse_input_filter` truoc.
 
 ```bash
 cd /home/chuvu/camellia-project/secure_usb_crypto
 sudo python3 app/crypto_mouse_gui.py
+```
+
+Neu chua nap `mouse_input_filter`:
+```bash
+cd /home/chuvu/camellia-project/mouse_driver_module
+make
+sudo insmod mouse_input_filter.ko
 ```
 
 ### Tinh nang GUI moi
