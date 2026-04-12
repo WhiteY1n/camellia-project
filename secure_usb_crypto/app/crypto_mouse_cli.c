@@ -19,12 +19,20 @@
 #define ENC_CHUNK_PLAIN_MAX (CRYPTO_MOUSE_MAX_DATA - 16)
 
 /*
+ * Note nhanh ve luong du lieu (de de hinh dung luc debug):
+ * Mouse -> driver kernel -> buffer trong /dev/crypto_mouse -> user-space CLI ->
+ * nap key Camellia -> ioctl encrypt/decrypt -> doc lai ket qua.
+ *
  * CLI la lop cau noi user-space <-> driver:
  * - Lenh don: status/setkey/write/read/encrypt/decrypt.
  * - Lenh file: cat file lon thanh chunk, moi chunk gui qua /dev/crypto_mouse.
  * - Decrypt tuong thich 2 dinh dang: chunk moi + legacy 1 blob cu.
  */
 
+/*
+ * Muc dich: in huong dan su dung CLI.
+ * Khi goi: luc thieu tham so hoac command khong hop le.
+ */
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -41,6 +49,10 @@ static void usage(const char *prog)
             prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
+/*
+ * Muc dich: doi 1 ky tu hex thanh gia tri so.
+ * Khi goi: ben trong parse_hex, khong dung truc tiep tu main.
+ */
 static int hex_val(char c)
 {
     if (c >= '0' && c <= '9')
@@ -52,6 +64,10 @@ static int hex_val(char c)
     return -1;
 }
 
+/*
+ * Muc dich: parse chuoi hex vao byte buffer.
+ * Khi goi: luc set key hoac write payload dang 0x... .
+ */
 static int parse_hex(const char *hex, uint8_t *out, size_t out_max, size_t *out_len)
 {
     size_t i;
@@ -81,6 +97,10 @@ static int parse_hex(const char *hex, uint8_t *out, size_t out_max, size_t *out_
     return 0;
 }
 
+/*
+ * Muc dich: lay status tu driver va in theo key=value.
+ * Khi goi: command "status".
+ */
 static int cmd_status(int fd)
 {
     struct crypto_mouse_status st;
@@ -97,6 +117,10 @@ static int cmd_status(int fd)
     return 0;
 }
 
+/*
+ * Muc dich: helper nho de lay status ma khong in ra man hinh.
+ * Khi goi: trong cac command file encrypt/decrypt can data_len.
+ */
 static int cmd_get_status(int fd, struct crypto_mouse_status *st)
 {
     if (ioctl(fd, CRYPTO_MOUSE_IOC_GET_STATUS, st) < 0)
@@ -104,11 +128,16 @@ static int cmd_get_status(int fd, struct crypto_mouse_status *st)
     return 0;
 }
 
+/*
+ * Muc dich: nap key Camellia vao driver.
+ * Khi goi: command "setkey" va truoc cac command file crypto.
+ */
 static int cmd_setkey(int fd, const char *hex)
 {
     struct crypto_mouse_key key_req;
     size_t key_len = 0;
 
+    /* key_req la packet gui qua ioctl(SET_KEY), gom key bytes + key_len. */
     memset(&key_req, 0, sizeof(key_req));
 
     /* Key hop le: 16/24/32 bytes (Camellia-128/192/256). */
@@ -128,12 +157,17 @@ static int cmd_setkey(int fd, const char *hex)
     return 0;
 }
 
+/*
+ * Muc dich: ghi plain payload vao buffer trong driver.
+ * Khi goi: command "write" (text thuong hoac hex).
+ */
 static int cmd_write(int fd, const char *arg)
 {
     uint8_t *buf;
     size_t len = 0;
     ssize_t wr;
 
+    /* buf la vung dem tam phia user-space truoc khi write vao device. */
     buf = malloc(CRYPTO_MOUSE_MAX_DATA);
     if (!buf) {
         perror("malloc");
@@ -169,6 +203,10 @@ static int cmd_write(int fd, const char *arg)
     return 0;
 }
 
+/*
+ * Muc dich: ghi du chinh xac "len" byte vao device.
+ * Khi goi: duong xu ly file chunk, can strict hon cmd_write.
+ */
 static int cmd_write_raw(int fd, const uint8_t *data, size_t len)
 {
     ssize_t wr;
@@ -185,6 +223,10 @@ static int cmd_write_raw(int fd, const uint8_t *data, size_t len)
     return 0;
 }
 
+/*
+ * Muc dich: doc noi dung hien co trong buffer driver va in hex.
+ * Khi goi: command "read".
+ */
 static int cmd_read(int fd)
 {
     uint8_t *buf;
@@ -216,6 +258,10 @@ static int cmd_read(int fd)
     return 0;
 }
 
+/*
+ * Muc dich: wrapper cho cac ioctl don (co in thong bao ok).
+ * Khi goi: command encrypt/decrypt/clearkey.
+ */
 static int cmd_simple_ioctl(int fd, unsigned long req, const char *name)
 {
     if (ioctl(fd, req) < 0) {
@@ -227,6 +273,24 @@ static int cmd_simple_ioctl(int fd, unsigned long req, const char *name)
     return 0;
 }
 
+/*
+ * Muc dich: wrapper ioctl im lang (chi bao loi), dung cho pipeline file.
+ * Khi goi: encrypt/decrypt theo chunk de tranh spam output.
+ */
+static int cmd_simple_ioctl_quiet(int fd, unsigned long req, const char *name)
+{
+    if (ioctl(fd, req) < 0) {
+        perror(name);
+        return 1;
+    }
+
+    return 0;
+}
+
+/*
+ * Muc dich: doc du so byte mong muon tu /dev/crypto_mouse.
+ * Khi goi: sau moi lan ioctl encrypt/decrypt trong file mode.
+ */
 static int read_device_exact(int fd, uint8_t *buf, size_t len)
 {
     size_t off = 0;
@@ -249,21 +313,22 @@ static int read_device_exact(int fd, uint8_t *buf, size_t len)
     return 0;
 }
 
-static int read_device_blob(uint8_t *buf, size_t len)
+/*
+ * Muc dich: reset offset fd doc ve 0 roi doc 1 blob dung do dai.
+ * Khi goi: moi lan can lay blob moi tu driver.
+ */
+static int read_device_blob_fd(int rd_fd, uint8_t *buf, size_t len)
 {
-    int rd_fd;
-    int rc;
-
-    /* Mo fd read rieng de doc output blob sau khi da ioctl encrypt/decrypt. */
-    rd_fd = open(DEV_PATH, O_RDONLY);
-    if (rd_fd < 0)
+    if (lseek(rd_fd, 0, SEEK_SET) < 0)
         return -1;
 
-    rc = read_device_exact(rd_fd, buf, len);
-    close(rd_fd);
-    return rc;
+    return read_device_exact(rd_fd, buf, len);
 }
 
+/*
+ * Muc dich: fread cho den khi du byte, tranh doc nua chung.
+ * Khi goi: doc chunk header/data va legacy blob tu file.
+ */
 static int read_exact_file(FILE *fp, uint8_t *buf, size_t len)
 {
     size_t off = 0;
@@ -287,6 +352,10 @@ static int read_exact_file(FILE *fp, uint8_t *buf, size_t len)
     return 0;
 }
 
+/*
+ * Muc dich: fwrite du so byte, fail som neu ghi thieu.
+ * Khi goi: ghi header/chunk/output file.
+ */
 static int write_exact_file(FILE *fp, const uint8_t *buf, size_t len)
 {
     if (fwrite(buf, 1, len, fp) != len) {
@@ -297,6 +366,10 @@ static int write_exact_file(FILE *fp, const uint8_t *buf, size_t len)
     return 0;
 }
 
+/*
+ * Muc dich: ghi metadata cua 1 chunk (plain_len + cipher_len).
+ * Khi goi: moi chunk sau khi encrypt xong.
+ */
 static int write_chunk_header(FILE *fp, uint32_t plain_len, uint32_t cipher_len)
 {
     uint32_t hdr[2];
@@ -308,10 +381,16 @@ static int write_chunk_header(FILE *fp, uint32_t plain_len, uint32_t cipher_len)
     return write_exact_file(fp, (const uint8_t *)hdr, sizeof(hdr));
 }
 
+/*
+ * Muc dich: doc header chunk va parse little-endian.
+ * Khi goi: vong lap decrypt chunked.
+ */
 static int read_chunk_header(FILE *fp, uint32_t *plain_len, uint32_t *cipher_len,
                              int *is_eof)
 {
     uint8_t raw[8];
+    uint32_t plain_le;
+    uint32_t cipher_le;
     size_t rd;
 
     /* EOF dung quy cach: fread=0 va khong co ferror. */
@@ -329,12 +408,18 @@ static int read_chunk_header(FILE *fp, uint32_t *plain_len, uint32_t *cipher_len
         return -1;
     }
 
-    /* Doc truc tiep 8 byte header thanh 2 so 32-bit LE. */
-    *plain_len = le32toh(*(uint32_t *)&raw[0]);
-    *cipher_len = le32toh(*(uint32_t *)&raw[4]);
+    /* Dung memcpy de tranh loi can le bo nho/strict-aliasing tren mot so KTS. */
+    memcpy(&plain_le, &raw[0], sizeof(plain_le));
+    memcpy(&cipher_le, &raw[4], sizeof(cipher_le));
+    *plain_len = le32toh(plain_le);
+    *cipher_len = le32toh(cipher_le);
     return 0;
 }
 
+/*
+ * Muc dich: ghi 1 blob du lieu ra file output.
+ * Khi goi: decrypt legacy xong can save plain.
+ */
 static int save_file(const char *path, const uint8_t *buf, size_t len)
 {
     FILE *fp = fopen(path, "wb");
@@ -351,6 +436,10 @@ static int save_file(const char *path, const uint8_t *buf, size_t len)
     return 0;
 }
 
+/*
+ * Muc dich: encrypt file lon theo stream chunk de khong bi limit MAX_DATA.
+ * Khi goi: command "encrypt-file".
+ */
 static int cmd_file_encrypt_chunked(int fd, const char *key_hex,
                                     const char *in_path, const char *out_path)
 {
@@ -360,6 +449,7 @@ static int cmd_file_encrypt_chunked(int fd, const char *key_hex,
     FILE *fin;
     FILE *fout;
     size_t in_len;
+    int rd_fd = -1;
     int rc = 1;
 
     /*
@@ -367,6 +457,7 @@ static int cmd_file_encrypt_chunked(int fd, const char *key_hex,
      * [magic 8B][plain_len 4B][cipher_len 4B][cipher bytes]...
      * Moi chunk plain toi da MAX_DATA-16 de sau padding van <= MAX_DATA.
      */
+    /* inbuf la plain chunk doc tu file; outbuf la cipher chunk doc nguoc tu driver. */
     inbuf = malloc(ENC_CHUNK_PLAIN_MAX);
     outbuf = malloc(CRYPTO_MOUSE_MAX_DATA);
     if (!inbuf || !outbuf) {
@@ -403,14 +494,24 @@ static int cmd_file_encrypt_chunked(int fd, const char *key_hex,
         goto out;
     }
 
-    /* Vong lap pipeline: file chunk -> write dev -> ioctl encrypt -> read dev -> ghi chunk. */
+    /* Tai su dung 1 read-fd cho toan bo vong lap chunk de giam syscall. */
+    rd_fd = open(DEV_PATH, O_RDONLY);
+    if (rd_fd < 0) {
+        perror("open read device");
+        goto out;
+    }
+
+    /*
+     * Pipeline moi chunk:
+     * file -> write(/dev/crypto_mouse) -> ioctl(ENCRYPT) -> read(/dev/crypto_mouse) -> file .enc
+     */
     while ((in_len = fread(inbuf, 1, ENC_CHUNK_PLAIN_MAX, fin)) > 0) {
         if (cmd_write_raw(fd, inbuf, in_len) != 0) {
             perror("write device");
             goto out;
         }
 
-        if (cmd_simple_ioctl(fd, CRYPTO_MOUSE_IOC_ENCRYPT, "ioctl(ENCRYPT)") != 0)
+        if (cmd_simple_ioctl_quiet(fd, CRYPTO_MOUSE_IOC_ENCRYPT, "ioctl(ENCRYPT)") != 0)
             goto out;
 
         if (cmd_get_status(fd, &st) != 0) {
@@ -424,7 +525,7 @@ static int cmd_file_encrypt_chunked(int fd, const char *key_hex,
             goto out;
         }
 
-        if (read_device_blob(outbuf, st.data_len) != 0) {
+        if (read_device_blob_fd(rd_fd, outbuf, st.data_len) != 0) {
             perror("read device");
             goto out;
         }
@@ -448,6 +549,8 @@ static int cmd_file_encrypt_chunked(int fd, const char *key_hex,
     rc = 0;
 
 out:
+    if (rd_fd >= 0)
+        close(rd_fd);
     fclose(fin);
     fclose(fout);
     free(inbuf);
@@ -463,6 +566,10 @@ out:
     return rc;
 }
 
+/*
+ * Muc dich: decrypt dinh dang cu (ca file la 1 blob cipher <= MAX_DATA).
+ * Khi goi: fallback khi file khong dung chunk magic.
+ */
 static int cmd_file_decrypt_legacy(int fd, const char *key_hex, const char *in_path,
                                    const char *out_path)
 {
@@ -471,6 +578,7 @@ static int cmd_file_decrypt_legacy(int fd, const char *key_hex, const char *in_p
     struct stat st_file;
     struct crypto_mouse_status st;
     size_t in_len;
+    int rd_fd = -1;
 
     /* Legacy format: ca file cipher nam tron trong 1 blob <= MAX_DATA. */
     if (stat(in_path, &st_file) != 0) {
@@ -485,6 +593,7 @@ static int cmd_file_decrypt_legacy(int fd, const char *key_hex, const char *in_p
     }
 
     in_len = (size_t)st_file.st_size;
+    /* inbuf giu blob cipher; outbuf giu ket qua plain tra ve tu driver. */
     inbuf = malloc(CRYPTO_MOUSE_MAX_DATA);
     outbuf = malloc(CRYPTO_MOUSE_MAX_DATA);
     if (!inbuf || !outbuf) {
@@ -545,12 +654,22 @@ static int cmd_file_decrypt_legacy(int fd, const char *key_hex, const char *in_p
         return 1;
     }
 
-    if (read_device_blob(outbuf, st.data_len) != 0) {
-        perror("read device");
+    rd_fd = open(DEV_PATH, O_RDONLY);
+    if (rd_fd < 0) {
+        perror("open read device");
         free(inbuf);
         free(outbuf);
         return 1;
     }
+
+    if (read_device_blob_fd(rd_fd, outbuf, st.data_len) != 0) {
+        perror("read device");
+        close(rd_fd);
+        free(inbuf);
+        free(outbuf);
+        return 1;
+    }
+    close(rd_fd);
 
     if (save_file(out_path, outbuf, st.data_len) != 0) {
         perror("save output file");
@@ -566,6 +685,10 @@ static int cmd_file_decrypt_legacy(int fd, const char *key_hex, const char *in_p
     return 0;
 }
 
+/*
+ * Muc dich: decrypt dinh dang chunk moi (co magic + header moi chunk).
+ * Khi goi: command "decrypt-file", uu tien thu chunked truoc.
+ */
 static int cmd_file_decrypt_chunked(int fd, const char *key_hex,
                                     const char *in_path, const char *out_path)
 {
@@ -575,8 +698,10 @@ static int cmd_file_decrypt_chunked(int fd, const char *key_hex,
     struct crypto_mouse_status st;
     FILE *fin;
     FILE *fout;
+    int rd_fd = -1;
     int rc = 1;
 
+    /* inbuf = chunk cipher doc tu file, outbuf = chunk plain lay tu driver. */
     inbuf = malloc(CRYPTO_MOUSE_MAX_DATA);
     outbuf = malloc(CRYPTO_MOUSE_MAX_DATA);
     if (!inbuf || !outbuf) {
@@ -623,6 +748,13 @@ static int cmd_file_decrypt_chunked(int fd, const char *key_hex,
     if (cmd_setkey(fd, key_hex) != 0)
         goto out;
 
+    /* Tai su dung 1 read-fd cho toan bo vong lap chunk de giam syscall. */
+    rd_fd = open(DEV_PATH, O_RDONLY);
+    if (rd_fd < 0) {
+        perror("open read device");
+        goto out;
+    }
+
     for (;;) {
         uint32_t plain_len = 0;
         uint32_t cipher_len = 0;
@@ -655,7 +787,7 @@ static int cmd_file_decrypt_chunked(int fd, const char *key_hex,
             goto out;
         }
 
-        if (cmd_simple_ioctl(fd, CRYPTO_MOUSE_IOC_DECRYPT, "ioctl(DECRYPT)") != 0)
+        if (cmd_simple_ioctl_quiet(fd, CRYPTO_MOUSE_IOC_DECRYPT, "ioctl(DECRYPT)") != 0)
             goto out;
 
         if (cmd_get_status(fd, &st) != 0) {
@@ -663,7 +795,7 @@ static int cmd_file_decrypt_chunked(int fd, const char *key_hex,
             goto out;
         }
 
-        /* Driver sau decrypt phai tra dung plain_len da luu trong chunk header. */
+        /* Driver phai tra dung plain_len, sai la co van de key/data. */
         if (st.data_len > CRYPTO_MOUSE_MAX_DATA || st.data_len != plain_len) {
             fprintf(stderr,
                     "driver/plain mismatch: plain=%u driver=%u\n",
@@ -671,7 +803,7 @@ static int cmd_file_decrypt_chunked(int fd, const char *key_hex,
             goto out;
         }
 
-        if (read_device_blob(outbuf, st.data_len) != 0) {
+        if (read_device_blob_fd(rd_fd, outbuf, st.data_len) != 0) {
             perror("read device");
             goto out;
         }
@@ -685,6 +817,8 @@ static int cmd_file_decrypt_chunked(int fd, const char *key_hex,
     rc = 0;
 
 out:
+    if (rd_fd >= 0)
+        close(rd_fd);
     fclose(fin);
     fclose(fout);
     free(inbuf);
@@ -699,6 +833,10 @@ out:
     return rc;
 }
 
+/*
+ * Muc dich: diem dispatch chung cho file encrypt/decrypt.
+ * Khi goi: tu main sau khi parse command encrypt-file/decrypt-file.
+ */
 static int cmd_file_crypto(int fd, const char *key_hex, const char *in_path,
                            const char *out_path, int do_encrypt)
 {
@@ -709,6 +847,10 @@ static int cmd_file_crypto(int fd, const char *key_hex, const char *in_path,
     return cmd_file_decrypt_chunked(fd, key_hex, in_path, out_path);
 }
 
+/*
+ * Muc dich: entrypoint CLI, parse argv va goi command phu hop.
+ * Khi goi: moi lan chay binary crypto_mouse_cli.
+ */
 int main(int argc, char **argv)
 {
     int fd;

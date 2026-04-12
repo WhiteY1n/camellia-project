@@ -13,11 +13,14 @@
 #include "crypto_mouse_ioctl.h"
 
 /*
- * Tong quan driver:
- * - Tao thiet bi char /dev/crypto_mouse de user-space doc/ghi + goi ioctl.
- * - Chi cho phep thao tac khi USB mouse dung VID/PID dang cam.
- * - Du lieu va key nam trong bo nho kernel, duoc bao ve bang mutex.
- * - Ma hoa/giai ma dung Camellia theo block 16 bytes + PKCS#7 padding.
+ * Ghi chu tong quan luong du lieu (ban than hay quen nen note lai):
+ * Mouse USB (dongle dung VID/PID) -> kernel driver -> crypto_data buffer ->
+ * user-space CLI/GUI -> nap key Camellia -> ioctl encrypt/decrypt.
+ *
+ * Y chinh cua module nay:
+ * - /dev/crypto_mouse la diem giao tiep voi user-space.
+ * - Chuot dung VID/PID dong vai tro "physical key": rut ra la khoa state.
+ * - key + buffer nam trong kernel va bi bao ve boi mutex.
  */
 
 static int is_mouse_plugged = 0;
@@ -34,6 +37,10 @@ static bool crypto_is_encrypted;
 static u8 camellia_key[CRYPTO_MOUSE_MAX_KEY];
 static u32 camellia_key_len;
 
+/*
+ * Muc dich: xoa buffer du lieu dang xu ly trong driver.
+ * Khi goi: luc rut chuot, clear state, hoac truoc khi module thoat.
+ */
 static void crypto_mouse_zeroize_data_locked(void)
 {
     /* Xoa sach du lieu nhay cam khi rut chuot/thoat module. */
@@ -43,12 +50,20 @@ static void crypto_mouse_zeroize_data_locked(void)
     crypto_is_encrypted = false;
 }
 
+/*
+ * Muc dich: xoa key Camellia khoi RAM kernel.
+ * Khi goi: khi user clear key, rut chuot, hoac cleanup.
+ */
 static void crypto_mouse_zeroize_key_locked(void)
 {
     memzero_explicit(camellia_key, sizeof(camellia_key));
     camellia_key_len = 0;
 }
 
+/*
+ * Muc dich: dong state ngay khi mat "physical key" (chuot USB).
+ * Khi goi: duong unplug hoac cleanup module.
+ */
 static void crypto_mouse_lock_on_unplug(void)
 {
     /* Coi viec rut chuot nhu mat "physical key" -> khoa toan bo state. */
@@ -58,6 +73,10 @@ static void crypto_mouse_lock_on_unplug(void)
     mutex_unlock(&crypto_lock);
 }
 
+/*
+ * Muc dich: check dung dongle chuot duoc chon hay khong.
+ * Khi goi: notifier/probe/scan ban dau deu qua day.
+ */
 static bool usb_crypto_is_target_mouse(struct usb_device *udev)
 {
     /* VID/PID cua USB dongle chuot duoc chon lam key vat ly. */
@@ -65,6 +84,10 @@ static bool usb_crypto_is_target_mouse(struct usb_device *udev)
            le16_to_cpu(udev->descriptor.idProduct) == 0x101f;
 }
 
+/*
+ * Muc dich: callback cho usb_for_each_dev de tim nhanh target mouse.
+ * Khi goi: trong usb_crypto_detect_mouse_present.
+ */
 static int usb_crypto_scan_cb(struct usb_device *udev, void *data)
 {
     int *found = data;
@@ -77,6 +100,10 @@ static int usb_crypto_scan_cb(struct usb_device *udev, void *data)
     return 0;
 }
 
+/*
+ * Muc dich: luc module vua load thi quet ngay trang thai chuot hien tai.
+ * Khi goi: trong ham init, truoc khi phuc vu user-space.
+ */
 static void usb_crypto_detect_mouse_present(void)
 {
     int found = 0;
@@ -91,6 +118,10 @@ static void usb_crypto_detect_mouse_present(void)
         printk(KERN_INFO "crypto_mouse: target mouse not present\n");
 }
 
+/*
+ * Muc dich: bat su kien cam/rut USB theo thoi gian thuc.
+ * Khi goi: USB core goi notifier nay cho moi bien dong thiet bi.
+ */
 static int usb_crypto_notify(struct notifier_block *self,
                              unsigned long action, void *data)
 {
@@ -124,6 +155,10 @@ static struct notifier_block usb_crypto_nb = {
     .notifier_call = usb_crypto_notify,
 };
 
+/*
+ * Muc dich: open /dev/crypto_mouse.
+ * Khi goi: user-space mo device node.
+ */
 static int crypto_mouse_open(struct inode *inode, struct file *file)
 {
     (void)inode;
@@ -133,6 +168,10 @@ static int crypto_mouse_open(struct inode *inode, struct file *file)
     return 0;
 }
 
+/*
+ * Muc dich: release /dev/crypto_mouse.
+ * Khi goi: user-space dong file descriptor.
+ */
 static int crypto_mouse_release(struct inode *inode, struct file *file)
 {
     (void)inode;
@@ -142,6 +181,10 @@ static int crypto_mouse_release(struct inode *inode, struct file *file)
     return 0;
 }
 
+/*
+ * Muc dich: tra data tu kernel buffer ve user-space.
+ * Khi goi: read tren /dev/crypto_mouse (CLI/GUI).
+ */
 static ssize_t crypto_mouse_read(struct file *file, char __user *buf,
                                  size_t count, loff_t *ppos)
 {
@@ -156,7 +199,7 @@ static ssize_t crypto_mouse_read(struct file *file, char __user *buf,
 
     mutex_lock(&crypto_lock);
 
-    /* Read ho tro theo offset (*ppos), nen user-space co the doc nhieu lan. */
+    /* Read theo offset de user-space co the read tiep phan con lai neu can. */
     if (*ppos >= crypto_data_len) {
         mutex_unlock(&crypto_lock);
         return 0;
@@ -175,6 +218,10 @@ static ssize_t crypto_mouse_read(struct file *file, char __user *buf,
     return to_copy;
 }
 
+/*
+ * Muc dich: nhan payload moi tu user-space vao crypto_data.
+ * Khi goi: write tren /dev/crypto_mouse truoc encrypt/decrypt.
+ */
 static ssize_t crypto_mouse_write(struct file *file, const char __user *buf,
                                   size_t count, loff_t *ppos)
 {
@@ -195,7 +242,7 @@ static ssize_t crypto_mouse_write(struct file *file, const char __user *buf,
         return -EFAULT;
     }
 
-    /* Moi lan write duoc xem la plaintext moi, reset trang thai cipher. */
+    /* write moi => coi nhu plain moi, huy co da_encrypt cu de tranh nham state. */
     crypto_data_len = count;
     crypto_plain_len = count;
     crypto_is_encrypted = false;
@@ -205,6 +252,10 @@ static ssize_t crypto_mouse_write(struct file *file, const char __user *buf,
     return count;
 }
 
+/*
+ * Muc dich: encrypt/decrypt in-place tren crypto_data theo block 16 bytes.
+ * Khi goi: boi ham PKCS#7 locked sau khi validate input.
+ */
 static int crypto_mouse_transform_buffer(bool encrypt)
 {
     struct crypto_cipher *tfm;
@@ -230,10 +281,7 @@ static int crypto_mouse_transform_buffer(bool encrypt)
         return ret;
     }
 
-    /*
-     * Xu ly theo tung block 16 bytes in-place.
-     * Dang nay la block cipher truc tiep tren buffer (tuong duong ECB demo).
-     */
+    /* Xu ly tung block 16B ngay tren buffer hien tai (demo truc tiep). */
     for (i = 0; i < crypto_data_len; i += 16) {
         if (encrypt)
             crypto_cipher_encrypt_one(tfm, crypto_data + i, crypto_data + i);
@@ -245,6 +293,10 @@ static int crypto_mouse_transform_buffer(bool encrypt)
     return 0;
 }
 
+/*
+ * Muc dich: them PKCS#7 roi encrypt buffer hien tai.
+ * Khi goi: ioctl ENCRYPT.
+ */
 static int crypto_mouse_encrypt_pkcs7_locked(void)
 {
     size_t pad_len;
@@ -269,6 +321,10 @@ static int crypto_mouse_encrypt_pkcs7_locked(void)
     return crypto_mouse_transform_buffer(true);
 }
 
+/*
+ * Muc dich: decrypt roi verify PKCS#7 de lay lai plain_len hop le.
+ * Khi goi: ioctl DECRYPT.
+ */
 static int crypto_mouse_decrypt_pkcs7_locked(void)
 {
     u8 pad_len;
@@ -300,6 +356,10 @@ static int crypto_mouse_decrypt_pkcs7_locked(void)
     return 0;
 }
 
+/*
+ * Muc dich: xu ly tat ca lenh dieu khien tu user-space.
+ * Khi goi: unlocked_ioctl cua /dev/crypto_mouse.
+ */
 static long crypto_mouse_ioctl(struct file *file, unsigned int cmd,
                                unsigned long arg)
 {
@@ -311,7 +371,7 @@ static long crypto_mouse_ioctl(struct file *file, unsigned int cmd,
 
     switch (cmd) {
     case CRYPTO_MOUSE_IOC_SET_KEY:
-        /* User-space gui key Camellia vao driver. */
+        /* Nhan key moi: day la key duoc dung cho cac lan transform tiep theo. */
         if (!is_mouse_plugged)
             return -EACCES;
 
@@ -332,7 +392,7 @@ static long crypto_mouse_ioctl(struct file *file, unsigned int cmd,
         return 0;
 
     case CRYPTO_MOUSE_IOC_ENCRYPT:
-        /* Encrypt tren du lieu hien dang nam trong crypto_data. */
+        /* Encrypt tren buffer hien tai, dong bo voi trang thai is_encrypted. */
         if (!is_mouse_plugged)
             return -EACCES;
 
@@ -346,7 +406,7 @@ static long crypto_mouse_ioctl(struct file *file, unsigned int cmd,
         return ret;
 
     case CRYPTO_MOUSE_IOC_DECRYPT:
-        /* Decrypt va validate PKCS#7; fail neu ciphertext hu/sai key. */
+        /* Decrypt + check PKCS#7, loi neu key sai hoac cipher bi hu. */
         if (!is_mouse_plugged)
             return -EACCES;
 
@@ -360,7 +420,7 @@ static long crypto_mouse_ioctl(struct file *file, unsigned int cmd,
         return ret;
 
     case CRYPTO_MOUSE_IOC_GET_STATUS:
-        /* GUI/CLI doc status de biet mouse/key/data dang o trang thai nao. */
+        /* GUI/CLI can status nay de biet key/buffer/mouse dang ra sao. */
         mutex_lock(&crypto_lock);
         st.mouse_present = is_mouse_plugged ? 1 : 0;
         st.key_ready = camellia_key_len ? 1 : 0;
@@ -375,7 +435,7 @@ static long crypto_mouse_ioctl(struct file *file, unsigned int cmd,
         return 0;
 
     case CRYPTO_MOUSE_IOC_CLEAR_KEY:
-        /* Xoa key chu dong theo lenh user-space. */
+        /* Cho user-space chu dong xoa key truoc khi ket thuc session. */
         mutex_lock(&crypto_lock);
         crypto_mouse_zeroize_key_locked();
         mutex_unlock(&crypto_lock);
@@ -403,6 +463,10 @@ static struct miscdevice crypto_mouse_miscdev = {
     .mode = 0666,
 };
 
+/*
+ * Muc dich: USB probe callback de danh dau mouse da cam.
+ * Khi goi: usb core goi khi gap dung VID/PID trong id_table.
+ */
 static int usb_crypto_probe(struct usb_interface *interface,
                             const struct usb_device_id *id)
 {
@@ -414,6 +478,10 @@ static int usb_crypto_probe(struct usb_interface *interface,
     return 0;
 }
 
+/*
+ * Muc dich: USB disconnect callback.
+ * Khi goi: usb core goi khi thiet bi target rut ra.
+ */
 static void usb_crypto_disconnect(struct usb_interface *interface)
 {
     (void)interface;
@@ -435,6 +503,10 @@ static struct usb_driver usb_crypto_driver = {
     .id_table = usb_crypto_id_table,
 };
 
+/*
+ * Muc dich: khoi tao module kernel cho secure_usb_crypto.
+ * Khi goi: module_init luc insmod.
+ */
 static int __init usb_crypto_drv_init(void)
 {
     int ret;
@@ -468,6 +540,10 @@ static int __init usb_crypto_drv_init(void)
     return 0;
 }
 
+/*
+ * Muc dich: thu hoi toan bo tai nguyen va wipe state truoc khi unload.
+ * Khi goi: module_exit luc rmmod.
+ */
 static void __exit usb_crypto_drv_exit(void)
 {
     /* Thu hoi tai nguyen + xoa du lieu truoc khi roi kernel. */

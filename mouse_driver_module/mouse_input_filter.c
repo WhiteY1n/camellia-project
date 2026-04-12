@@ -45,13 +45,13 @@ struct mouse_ctx {
 static struct proc_dir_entry *proc_log_entry;
 static struct proc_dir_entry *proc_entropy_entry;
 
-/* Ring buffer for human-readable event log lines. */
+/* Log text de debug nhanh hanh vi filter (doc qua /proc/mouse_log). */
 static struct mouse_log_entry log_ring[LOG_RING_SIZE];
 static unsigned int log_head;
 static unsigned int log_count;
 static DEFINE_SPINLOCK(log_lock);
 
-/* Ring buffer for movement samples used as entropy input. */
+/* Luu mau chuyen dong thuc te (dx/dy) de trich entropy qua /proc/mouse_entropy. */
 static struct mouse_entropy_sample entropy_ring[ENTROPY_RING_SIZE];
 static unsigned int entropy_head;
 static unsigned int entropy_count;
@@ -59,6 +59,10 @@ static DEFINE_SPINLOCK(entropy_lock);
 
 static bool logging_enabled = true;
 
+/*
+ * Muc dich: ghi 1 dong log vao ring buffer.
+ * Khi goi: duoc goi boi filter/worker/connect/disconnect moi khi can de lai dau vet.
+ */
 static void mouse_log_add(bool force, const char *fmt, ...)
 {
 	struct mouse_log_entry entry;
@@ -82,6 +86,10 @@ static void mouse_log_add(bool force, const char *fmt, ...)
 	spin_unlock_irqrestore(&log_lock, flags);
 }
 
+/*
+ * Muc dich: cat 1 mau chuyen dong (dx, dy) vao entropy ring.
+ * Khi goi: sau moi SYN_REPORT, khi da gom xong delta REL_X/REL_Y trong 1 frame.
+ */
 static void mouse_entropy_add(int dx, int dy)
 {
 	struct mouse_entropy_sample sample;
@@ -99,11 +107,19 @@ static void mouse_entropy_add(int dx, int dy)
 	spin_unlock_irqrestore(&entropy_lock, flags);
 }
 
+/*
+ * Muc dich: day cap dx/dy dang pending ra log + entropy roi reset ve 0.
+ * Khi goi: o moc SYN_REPORT, de gom event REL_X/REL_Y theo tung frame chuot.
+ */
 static void mouse_flush_pending_move(struct mouse_ctx *ctx)
 {
 	if (!ctx->pending_dx && !ctx->pending_dy)
 		return;
 
+	/*
+	 * dx/dy la tong delta trong 1 frame SYN_REPORT, khong phai toa do tuyet doi.
+	 * Gom theo frame de log/entropy on dinh hon viec xu ly tung event roi rac.
+	 */
 	mouse_log_add(false, "MOVE: dx=%d dy=%d", ctx->pending_dx, ctx->pending_dy);
 	mouse_entropy_add(ctx->pending_dx, ctx->pending_dy);
 
@@ -112,8 +128,11 @@ static void mouse_flush_pending_move(struct mouse_ctx *ctx)
 }
 
 /*
- * Defers event injection to process context. Injecting from filter callback
- * can recurse through input core internals and may lock up the system.
+ * Muc dich: worker bat tay viec doi left-click thanh right-click.
+ * Khi goi: duoc schedule boi mouse_queue_right_click sau khi filter bat BTN_LEFT.
+ *
+ * Ly do dung workqueue: filter callback chay rat sau trong input path;
+ * inject truc tiep tai do de gay de quy vao input core va de treo may.
  */
 static void mouse_right_click_worker(struct work_struct *work)
 {
@@ -142,6 +161,10 @@ static void mouse_right_click_worker(struct work_struct *work)
 	}
 }
 
+/*
+ * Muc dich: queue su kien left-click de worker xu ly bat dong bo.
+ * Khi goi: trong mouse_filter ngay khi bat gap BTN_LEFT.
+ */
 static void mouse_queue_right_click(struct mouse_ctx *ctx, int value)
 {
 	unsigned long flags;
@@ -157,13 +180,25 @@ static void mouse_queue_right_click(struct mouse_ctx *ctx, int value)
 	}
 	spin_unlock_irqrestore(&ctx->right_lock, flags);
 
+	/* Queue day thi bo event cho an toan, tranh block duong input chinh. */
 	mouse_log_add(true, "WARN: right-click queue full, dropping event");
 }
 
 /*
- * The filter callback runs inside the input_handler flow before events
- * are delivered to regular userspace-facing handlers (for example evdev).
- * Returning true consumes (blocks) the original event.
+ * Muc dich: day la diem cham chinh cua input_handler de can thiep event chuot.
+ * Khi goi: input core goi truoc khi event duoc day toi cac handler user-space (evdev,...).
+ *
+ * Vi sao intercept o day:
+ * - Day la cho som nhat de doi/chuan hoa hanh vi click theo y do module.
+ * - Neu de muon hon (sau evdev) thi user-space da nhan event goc roi, khong chan duoc.
+ *
+ * Rule nho de tranh nham:
+ * - return true  => an event goc (block).
+ * - return false => cho event di tiep.
+ *
+ * Luong du lieu phia input:
+ * Mouse HW -> input core -> mouse_filter -> pending dx/dy + queue click ->
+ * worker/proc ring -> user-space doc /proc.
  */
 static bool mouse_filter(struct input_handle *handle,
 			 unsigned int type, unsigned int code, int value)
@@ -173,11 +208,13 @@ static bool mouse_filter(struct input_handle *handle,
 	switch (type) {
 	case EV_REL:
 		if (code == REL_X) {
+			/* dx la delta ngang theo tung event REL_X. */
 			ctx->pending_dx += value;
 			return false;
 		}
 
 		if (code == REL_Y) {
+			/* dy la delta doc theo tung event REL_Y. */
 			ctx->pending_dy += value;
 			return false;
 		}
@@ -193,22 +230,24 @@ static bool mouse_filter(struct input_handle *handle,
 		return false;
 
 	case EV_KEY:
-		/* Convert left click into right click and suppress original left event. */
+		/* Bat left click de doi qua right click theo yeu cau module. */
 		if (code == BTN_LEFT) {
 			mouse_queue_right_click(ctx, value);
+			/* Chan event left goc, chi giu event da doi o worker. */
 			return true;
 		}
 
-		/* Allow synthetic right-click generated by our worker. */
+		/* Cho su kien right click do chinh worker inject quay lai. */
 		if (code == BTN_RIGHT && READ_ONCE(ctx->injecting_right))
 			return false;
 
-		/* Block right click entirely. */
+		/* Right click that tu thiet bi bi chan hoan toan. */
 		if (code == BTN_RIGHT) {
 			mouse_log_add(false, "BTN_RIGHT blocked (value=%d)", value);
 			return true;
 		}
 
+		/* Middle click dung lam nut bat/tat log nhanh luc test. */
 		if (code == BTN_MIDDLE && value == 1) {
 			bool new_state = !READ_ONCE(logging_enabled);
 
@@ -224,6 +263,10 @@ static bool mouse_filter(struct input_handle *handle,
 	}
 }
 
+/*
+ * Muc dich: dump snapshot log_ring ra /proc/mouse_log.
+ * Khi goi: moi lan user-space read file proc.
+ */
 static int mouse_log_proc_show(struct seq_file *m, void *v)
 {
 	struct mouse_log_entry *snapshot;
@@ -236,6 +279,7 @@ static int mouse_log_proc_show(struct seq_file *m, void *v)
 	if (!snapshot)
 		return -ENOMEM;
 
+	/* Copy snapshot duoi lock, in ra sau de tranh giu lock qua lau. */
 	spin_lock_irqsave(&log_lock, flags);
 	count = log_count;
 	head = log_head;
@@ -257,6 +301,10 @@ static int mouse_log_proc_show(struct seq_file *m, void *v)
 	return 0;
 }
 
+/*
+ * Muc dich: dump snapshot entropy_ring ra /proc/mouse_entropy.
+ * Khi goi: moi lan user-space read file proc.
+ */
 static int mouse_entropy_proc_show(struct seq_file *m, void *v)
 {
 	struct mouse_entropy_sample *snapshot;
@@ -269,6 +317,7 @@ static int mouse_entropy_proc_show(struct seq_file *m, void *v)
 	if (!snapshot)
 		return -ENOMEM;
 
+	/* Cach lam giong log: copy nhanh du lieu, nhe lock, roi moi format output. */
 	spin_lock_irqsave(&entropy_lock, flags);
 	count = entropy_count;
 	head = entropy_head;
@@ -291,11 +340,19 @@ static int mouse_entropy_proc_show(struct seq_file *m, void *v)
 	return 0;
 }
 
+/*
+ * Muc dich: proc open callback cho /proc/mouse_log.
+ * Khi goi: VFS goi khi file proc duoc mo.
+ */
 static int mouse_log_proc_open(struct inode *inode, struct file *file)
 {
 	return single_open(file, mouse_log_proc_show, NULL);
 }
 
+/*
+ * Muc dich: proc open callback cho /proc/mouse_entropy.
+ * Khi goi: VFS goi khi file proc duoc mo.
+ */
 static int mouse_entropy_proc_open(struct inode *inode, struct file *file)
 {
 	return single_open(file, mouse_entropy_proc_show, NULL);
@@ -315,6 +372,10 @@ static const struct proc_ops mouse_entropy_proc_ops = {
 	.proc_release = single_release,
 };
 
+/*
+ * Muc dich: tao context rieng va attach handler vao input device vua match.
+ * Khi goi: input core goi khi 1 thiet bi phu hop mouse_ids xuat hien.
+ */
 static int mouse_connect(struct input_handler *handler, struct input_dev *dev,
 			 const struct input_device_id *id)
 {
@@ -352,6 +413,10 @@ err_free_ctx:
 	return err;
 }
 
+/*
+ * Muc dich: cleanup context khi device ngat ket noi.
+ * Khi goi: input core goi trong duong disconnect.
+ */
 static void mouse_disconnect(struct input_handle *handle)
 {
 	struct mouse_ctx *ctx = container_of(handle, struct mouse_ctx, handle);
@@ -395,6 +460,10 @@ static struct input_handler mouse_input_handler = {
 	.id_table = mouse_ids,
 };
 
+/*
+ * Muc dich: khoi tao module, tao proc node va dang ky input handler.
+ * Khi goi: luc module_init chay khi insmod.
+ */
 static int __init mouse_input_filter_init(void)
 {
 	int err;
@@ -410,6 +479,7 @@ static int __init mouse_input_filter_init(void)
 		return -ENOMEM;
 	}
 
+	/* Dang ky input_handler de bat dau intercept su kien chuot. */
 	err = input_register_handler(&mouse_input_handler);
 	if (err) {
 		remove_proc_entry(PROC_ENTROPY_NAME, NULL);
@@ -421,6 +491,10 @@ static int __init mouse_input_filter_init(void)
 	return 0;
 }
 
+/*
+ * Muc dich: go dang ky handler/proc khi module roi khoi kernel.
+ * Khi goi: luc module_exit chay khi rmmod.
+ */
 static void __exit mouse_input_filter_exit(void)
 {
 	input_unregister_handler(&mouse_input_handler);
