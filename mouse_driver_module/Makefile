@@ -6,5 +6,8 @@ PWD := $(shell pwd)
 all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
+ui:
+	python3 mouse_filter_dashboard.py
+
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
