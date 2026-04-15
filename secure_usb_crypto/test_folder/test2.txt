@@ -1,1 +1,13 @@
-học thầy chưa tày bằng độ u i a
+Ví dụ CLI để demo nhanh:
+```bash
+cd /home/chuvu/camellia-project/secure_usb_crypto/app
+./crypto_mouse_cli status
+./crypto_mouse_cli encrypt-file 00112233445566778899aabbccddeeff input.txt input.enc
+./crypto_mouse_cli decrypt-file 00112233445566778899aabbccddeeff input.enc output.txt
+```
+
+**5. Kết thúc**
+Gỡ các module:
+```bash
+sudo rmmod usb_crypto_drv
+sudo rmmod mouse_input_filter

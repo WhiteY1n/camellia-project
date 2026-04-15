@@ -447,10 +447,46 @@ static long crypto_mouse_ioctl(struct file *file, unsigned int cmd,
     }
 }
 
+/*
+ * Muc dich: ho tro SEEK_SET/SEEK_CUR/SEEK_END tren /dev/crypto_mouse.
+ * Khi goi: user-space can reset/read offset (vd CLI chunked read path).
+ */
+static loff_t crypto_mouse_llseek(struct file *file, loff_t off, int whence)
+{
+    loff_t newpos;
+
+    mutex_lock(&crypto_lock);
+
+    switch (whence) {
+    case SEEK_SET:
+        newpos = off;
+        break;
+    case SEEK_CUR:
+        newpos = file->f_pos + off;
+        break;
+    case SEEK_END:
+        newpos = (loff_t)crypto_data_len + off;
+        break;
+    default:
+        mutex_unlock(&crypto_lock);
+        return -EINVAL;
+    }
+
+    if (newpos < 0) {
+        mutex_unlock(&crypto_lock);
+        return -EINVAL;
+    }
+
+    file->f_pos = newpos;
+    mutex_unlock(&crypto_lock);
+    return newpos;
+}
+
 static const struct file_operations crypto_mouse_fops = {
     .owner = THIS_MODULE,
     .open = crypto_mouse_open,
     .release = crypto_mouse_release,
+    .llseek = crypto_mouse_llseek,
     .read = crypto_mouse_read,
     .write = crypto_mouse_write,
     .unlocked_ioctl = crypto_mouse_ioctl,

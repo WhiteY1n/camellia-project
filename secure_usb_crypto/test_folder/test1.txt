@@ -1,1 +1,25 @@
-ở đời tôi chả nể ai chỉ nể hon dai anh giai người tày u i a
+
+**3. Demo bài 2: driver chuột USB**
+Nạp module:
+```bash
+cd /home/chuvu/camellia-project/mouse_driver_module
+sudo insmod mouse_input_filter.ko
+```
+
+Kiểm tra:
+```bash
+cat /proc/mouse_log
+cat /proc/mouse_entropy
+```
+
+Thao tác để demo:
+- Di chuyển chuột: thấy `MOVE: dx=... dy=...`
+- Click trái: bị convert sang click phải
+- Click phải: bị block
+- Click giữa: toggle logging ON/OFF
+- Lăn wheel: thấy `WHEEL: delta=...`
+
+Gỡ module khi xong phần 2:
+```bash
+sudo rmmod mouse_input_filter
+```
