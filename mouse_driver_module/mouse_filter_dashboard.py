@@ -136,8 +136,11 @@ class MouseFilterDashboard(tk.Tk):
         clear_btn = ttk.Button(button_frame, text="Xóa màn hình", style="Action.TButton", command=self.clear_view)
         clear_btn.grid(row=0, column=1, padx=4, pady=2, sticky="ew")
 
+        reset_btn = ttk.Button(button_frame, text="Reset số liệu", style="Action.TButton", command=self.reset_logged_results)
+        reset_btn.grid(row=0, column=2, padx=4, pady=2, sticky="ew")
+
         snapshot_btn = ttk.Button(button_frame, text="Snapshot TXT", style="Action.TButton", command=self.export_snapshot)
-        snapshot_btn.grid(row=0, column=2, padx=4, pady=2, sticky="ew")
+        snapshot_btn.grid(row=0, column=3, padx=4, pady=2, sticky="ew")
 
         stats = ttk.Frame(root, style="Root.TFrame")
         stats.pack(fill=tk.X, pady=(10, 8))
@@ -219,6 +222,15 @@ class MouseFilterDashboard(tk.Tk):
         self.entropy_points.clear()
         self.redraw_chart()
         self.entropy_info_var.set("Entropy: đã xóa màn hình, chờ dữ liệu mới")
+
+    def reset_logged_results(self) -> None:
+        self.clear_view()
+
+        for key in self.metrics:
+            self.metrics[key] = 0
+            self.metric_vars[key].set("0")
+
+        self.entropy_info_var.set("Entropy: đã reset số liệu, chờ dữ liệu mới")
 
     def export_snapshot(self) -> None:
         default_name = f"mouse_filter_snapshot_{dt.datetime.now():%Y%m%d_%H%M%S}.txt"
